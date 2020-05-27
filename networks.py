@@ -1191,16 +1191,20 @@ class NetworkTree:
       # Join with other side of parent tree
       return NetworkTree(rearrange, side)
 
-  def pprint(self, pattern=(), isleft=False):
+  def pprint(self, pattern=(), isleft=False, use_ascii=False):
+    if use_ascii:
+      assert not pattern and not isleft
+      self.pprint_ascii()
+      return
     # First print root (already aligned at $depth columns)
-    #if not isleft:
     depth = len(pattern)
+    kw = dict(end='',flush=config.flush)
     if not depth:
       # Root node is |-
-      print('\u251C',end='')
+      print('\u251C',**kw)
     else:
       # Root node is tee
-      print('\u252C',end='')
+      print('\u252C',**kw)
     # Print 'left' node
     if isinstance(self.left,NetworkTree):
       self.left.pprint(pattern+(1,),True)
@@ -1209,14 +1213,41 @@ class NetworkTree:
     # Before printing right: align to $depth
     for b in pattern:
       if b:
-        print('\u2502',end='')
+        print('\u2502',**kw)
       else:
-        print(' ',end='')
-    print('\u2514',end='')
+        print(' ',**kw)
+    print('\u2514',**kw)
     if isinstance(self.right,NetworkTree):
       self.right.pprint(pattern+(0,),False)
     else:
-      print(self.right)
+      print(self.right,flush=config.flush)
+
+  def pprint_ascii(self, pattern=(), isleft=False):
+    # First print root (already aligned at $depth columns)
+    depth = len(pattern)
+    kw = dict(end='',flush=config.flush)
+    if not depth:
+      # Root node is |-
+      print('L_',**kw)
+    else:
+      # Root node is tee
+      print('__',**kw)
+    # Print 'left' node
+    if isinstance(self.left,NetworkTree):
+      self.left.pprint_ascii(pattern+(1,),True)
+    else:
+      print(self.left)
+    # Before printing right: align to $depth
+    for b in pattern:
+      if b:
+        print('| ',**kw)
+      else:
+        print('  ',**kw)
+    print('L_',**kw)
+    if isinstance(self.right,NetworkTree):
+      self.right.pprint_ascii(pattern+(0,),False)
+    else:
+      print(self.right,flush=config.flush)
 
 
 class OptimizationOverflow(MemoryError):

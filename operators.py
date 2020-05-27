@@ -28,7 +28,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
 
   def _matvec(self, v):
     if config.lin_iter_verbose:
-      print('Iteration #%d'%self.iters)
+      print('Iteration #%d'%self.iters,flush=config.flush)
     self.iters += 1
     T0 = self.tensor_in(v)
     T1 = self.tensor_action(T0)
@@ -36,7 +36,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
 
   def _adjoint(self, v):
     if config.lin_iter_verbose:
-      print('Iteration (adjoint) #%d'%self.iters)
+      print('Iteration (adjoint) #%d'%self.iters,flush=config.flush)
     self.iters += 1
     if not self.has_adjoint:
       raise NotImplementedError()

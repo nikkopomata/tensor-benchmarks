@@ -1069,7 +1069,14 @@ class Tensor:
     arr2 = T2._T
     if conj:
       arr2 = arr2.conj()
-    T = np.tensordot(self._T,arr2,[i1,i2])
+    try:
+      T = np.tensordot(self._T,arr2,[i1,i2])
+    except MemoryError as me:
+      print(copy(self.shape))
+      print(copy(T2.shape))
+      print('%dx%d->%d'%(self.numel,T2.numel,
+        functools.reduce(int.__mul__,[v.dim for v in vout1+vout2])))
+      raise me
     if len(lout1)+len(lout2) == 0: # Scalar
       return T[()]
     return self._tensorfactory(T, tuple(lout1+lout2), tuple(vout1+vout2))
@@ -1455,6 +1462,7 @@ class TensorTransposedView(Tensor):
     self.__tensor = T0
     self.__idxdict = dict(idxdict)
     self._idxs = tuple(idxdict[l] for l in T0._idxs)
+    self.shape = dictproperty(self._Tensor__shape_get, None, self._Tensor__shape_has, self._Tensor__shape_copy)
 
   @property
   def _T(self):

@@ -15,6 +15,8 @@ degen_tolerance = 1e-6
 memcap = None
 # Ratio of memory to maximum number of elements in tensor to be produced
 memratio = 10
+# Whether output is to be flushed
+flush = True
 
 def restrict_memory(newmemcap):
   import resource
