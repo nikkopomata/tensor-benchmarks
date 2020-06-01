@@ -575,6 +575,7 @@ class Network:
         for t in re.findall(r'\b\w+\b',clause):
           if t not in tensors:
             raise ValueError('Removed node %s does not exist'%t)
+          it = tensors[t]
           del tensors[t]
           del conj[t]
           bs = bonds.pop(t)
@@ -607,6 +608,15 @@ class Network:
     # Verify that output names are not duplicated
     # (should be the only issue possible at this point)
     # Initialize Network object
+    # Check that all tensors listed remain
+    shifted = list(range(len(tlist)))
+    vset = set(tensors.values())
+    if len(vset) < len(tlist):
+      tmap = sorted(vset)
+      rmap = {tmap[i]:i for i in range(len(tmap))}
+      for t in tensors:
+        tensors[t] = rmap[tensors[t]]
+      tlist = [tlist[tmap[i]] for i in range(len(tmap))]
     net = Network(tlist, tensors, conj)
     net._set_bonds(bonds)
     net._set_output(out)

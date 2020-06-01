@@ -1212,7 +1212,12 @@ class Tensor:
       raise ValueError('Center indices must be distinct if singular values'
         ' are reported as tensor')
     M,info = self._do_fuse((0,ls),(1,rs))
-    U,s,V = M._do_svd(chi, tolerance, chi_ratio, sv_tensor)
+    try:
+      U,s,V = M._do_svd(chi, tolerance, chi_ratio, sv_tensor)
+    except MemoryError as me:
+      print(copy(self.shape))
+      print('%dx%d'%(M.shape[0],M.shape[1]))
+      raise me
     U = U._do_unfuse({0:(ls, False)+info[0][1:], 1:cl})
     V = V._do_unfuse({0:cr, 1:(rs, False)+info[1][1:]})
     if sv_tensor:

@@ -16,6 +16,7 @@ def safesvd(matrix):
       # Without full_matrices:
       U, s, Vd = linalg.svd(matrix, full_matrices=True)
     except linalg.LinAlgError:
+      global numsvd
       numsvd += 1
       print('SVD did not converge, manually computing SVD (#%d)' % numsvd)
       try:
