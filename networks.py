@@ -634,17 +634,40 @@ class Network:
       raise ValueError('Output index name %s repeated'%_findrep1(net._out.values()))
     return net
 
-  def subnetwork(self, minus, out=True):
+  def subnetwork(self, minus, out=None):
     """Returns subnetwork with tensors listed (iterable or comma-separated)
     removed
-    May specify additional output index names *either* using a second clause
-      of the form t0.l0->l,...,
-    by setting out to be a dictionary from (node, index) to new name,
-    or by letting out=True (default) in which case free index names are
-      auto-completed"""
+    May specify additional output index names by:
+      using a second clause of the form t0.l0->l,..., (or
+        by setting out to be a dictionary from (node, index) to new name)
+      and, alone or in combination with a second clause,
+      out='reuse': original output names are used
+      out='env': environment mode - name of contracted index
+      out='auto' (or ~ flag): index name is kept as-is"""
     if isinstance(minus, str):
-      if not re.fullmatch(r'\w+(,\w+)*(;(\w+\.\w+\>\w+(,|$))+(?<!,))?',minus):
+      if not re.fullmatch(r'\w+(,\w+)*(;(\w+\.\w+\>\w+(,|$|\~$))+\~?(?<!,))?'
+          ,minus):
         raise ValueError('Invalid argument \'%s\''%minus)
+      if minus[-1] == '~':
+        if minus[-2] == ',':
+          minus = minus[:-2]
+        else:
+          minus = minus[:-1]
+        mode = 'auto'
+      elif out == 'auto':
+        mode = 'auto'
+        out = {}
+      elif out in ['env','reuse']:
+        mode = out
+        out = {}
+      else:
+        mode = None
+        if not out:
+          out = {}
+        elif not isinstance(out,dict):
+          raise ValueError('out must be dictionary or valid mode')
+        auto = False
+
       mo = minus.split(';')
       if len(mo) == 2:
         minus,outstr = mo
@@ -660,25 +683,29 @@ class Network:
     sminus = set(minus)
     if len(sminus) < len(minus):
       raise ValueError('Excluded node %s repeated'%_findrep1(minus))
-    if out is True:
-      # Automatically complete output index names
-      out = {}
+    for t,l in out:
+      if t not in self._tdict:
+        raise KeyError('Node %s missing'%t)
+      if l not in self._tlist[self._tdict[t]]:
+        raise KeyError('Index %s.%s missing'%(t,l))
+    if mode == 'env' or mode == 'reuse':
       # First employ existing output names
       for t,l in self._out:
-        if t not in sminus and l not in self._bonds[t]:
+        if t not in sminus and l not in self._tbonds[t]:
           out[t,l] = self._out[t,l]
+    if mode == 'env':
       # Now add names corresponding to removed tensors
       for t in sminus:
-        for l in self._tbond[t]:
-          t1,l1 = self._tbond[t][l]
+        for l in self._tbonds[t]:
+          t1,l1 = self._tbonds[t][l]
           if t1 not in sminus:
             out[t1,l1] = l
-    else:
-      for t,l in out:
-        if t not in self._tdict:
-          raise KeyError('Node %s missing'%t)
-        if l not in self._tlist[self._tdict[t]]:
-          raise KeyError('Index %s.%s missing'%(t,l))
+    if mode == 'auto':
+      for t in set(self._tdict.keys())-sminus:
+        tb = self._tbonds[t]
+        for l in self._tlist[self._tdict[t]].idxset:
+          if (l not in tb or tb[l][0] in sminus) and (t,l) not in out:
+            out[t,l] = l
     if len(set(out.values())) > len(out):
       raise ValueError('Output index name %s duplicated'%_findrep1(out))
     net = SubnetworkView(self, sminus, out)
@@ -1022,19 +1049,19 @@ class SubnetworkView(Network):
     self._tchained = {}
     self._tbonds = {}
     for t in self._tensors:
-      for l in net._tbond[t]:
-        if net._tbond[t][l][0] in sminus and (t,l) not in out:
+      for l in net._tbonds[t]:
+        if net._tbonds[t][l][0] in sminus and (t,l) not in out:
           self._tout[t][l] = None
-      self._tchained[t] = collections.ChainMap(self._tout[t],net._tbond[t])
+      self._tchained[t] = collections.ChainMap(self._tout[t],net._tbonds[t])
       self._tbonds[t] = dictproperty(self.__bondget,None,self.__hasbondidx,
         self.__bondcopy, t)
     self._tree = None
     self._tlist = net._tlist
     self._tdict = dictproperty(self.__tdictget,self.__tdictset,
-      self.__istensor, self.__tdictcopy)
+      self._tensors, self.__tdictcopy)
     self._conj = dictproperty(self.__conjget, self.__conjset,
-      self.__istensor, self.__conjcopy)
-    self._bonded = dictproperty(self.__bondedget,None,self.__istensor,
+      self._tensors, self.__conjcopy)
+    self._bonded = dictproperty(self.__bondedget,None,self._tensors,
       self.__bondedcopy)
     self._tset = dictproperty(self.__tsetget,None,self.__tidxs,self.__tsetcopy)
 
@@ -1062,20 +1089,20 @@ class SubnetworkView(Network):
 
   def __hasbondidx(self, l, t):
     return l in self._parent._tbonds[t] \
-      and self._parent._tbonds[t][0] in self._tensors
+      and self._parent._tbonds[t][l][0] in self._tensors
 
   def __bondcopy(self, t):
     td = self._parent._tbonds[t]
     return {l: td[l] for l in td if td[l][0] in self._tensors}
 
   def __bondget(self, key, t):
-    return self._parent._tbonds[t]
+    return self._parent._tbonds[t][key]
  
   def __bondedcopy(self):
     return {t: self._parent._bonded[t]&self._tensors for t in self._tensors}
 
   def __bondedget(self, key):
-    return self._parent._bonded[t] & self._tensors
+    return self._parent._bonded[key] & self._tensors
 
   def __tidxs(self, key):
     return isinstance(key, int) and key >= 0 and key < len(self._parent._tlist)

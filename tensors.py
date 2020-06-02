@@ -1491,7 +1491,12 @@ class dictproperty:
   network"""
   
   def __init__(self, fgetitem, fsetitem, fhas, fget, *argx):
-    self.fhas = fhas
+    if callable(fhas):
+      self.fhas = fhas
+      self.__keys = None
+    else:
+      self.fhas = None
+      self.__keys = fhas
     self.fgetitem = fgetitem
     self.fcopy = fget
     self.fsetitem = fsetitem
@@ -1499,19 +1504,22 @@ class dictproperty:
     self.__doc__ = fgetitem.__doc__
 
   def __getitem__(self, key):
-    if not self.fhas(key):
+    if key not in self:
       raise AttributeError('%s missing'%key)
     return self.fgetitem(key, *self.argx)
 
   def __setitem__(self, key, value):
     if self.fsetitem is None:
       raise AttributeError('Cannot set item in inherited dictionary')
-    if not self.fhas(key):
+    if key not in self:
       raise KeyError('%s missing'%key)
     return self.fsetitem(key, value, *self.argx)
 
   def __contains__(self, key):
-    return self.fhas(key, *self.argx)
+    if self.fhas is None:
+      return key in self.__keys
+    else:
+      return self.fhas(key, *self.argx)
 
   def __set__(self, obj, value):
     raise AttributeError('Descriptor cannot be replaced')
@@ -1525,11 +1533,26 @@ class dictproperty:
       return deepcopy(cpy)
 
   def keys(self):
-    return self.__copy__.keys()
+    if self.__keys is not None:
+      return set(self.__keys)
+    else:
+      return self.__copy__().keys()
 
   def values(self):
-    return self.__copy__.values()
+    return self.__copy__().values()
+
+  def __len__(self):
+    if self.__keys is not None:
+      return len(self.__keys)
+    else:
+      return len(self.__copy__())
+
+  def __iter__(self):
+    if self.__keys is not None:
+      return iter(self.__keys)
+    else:
+      return iter(self.__copy__())
 
   def items(self):
-    return self.__copy__.items()
+    return self.__copy__().items()
 
