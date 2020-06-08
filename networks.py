@@ -49,6 +49,8 @@ class Network:
       (with * when conjugated)
     optional two final clauses of parsestr:
       list of bonds, of the form A.a-B.b
+        may have `inner-product style' subclause of the form
+        (A,B)[a,b,c] (indicates A.a-B.a,A.b-B.b,A.c-B.c)
       list of index names in contracted tensor, of the form
         A.l>a,B.l>b
         terminated with ~ for autocompletion
@@ -64,6 +66,7 @@ class Network:
     elif len(substrs) > N+2:
       raise ValueError('%d too many substrings provided'%(len(substrs)-N-2))
     tdict = {}
+    tobjdict = {}
     conj = {}
     for i in range(N):
       for ss in substrs[i].split(','):
@@ -74,16 +77,18 @@ class Network:
         if t in tdict:
           raise ValueError('Tensor %s repeated'%ll)
         tdict[t] = i
+        tobjdict[t] = tensors[i]
         conj[t] = bool(c)
     Net = cls(tensors, tdict, conj)
     if len(substrs) > N:
       pstr = substrs[N]
-      if not re.fullmatch(r'(?!,)((^|,)\w+\.\w+-\w+\.\w+)*', pstr):
+      if not re.fullmatch(r'(?!,)((^|,)(\w+\.\w+-\w+\.\w+|\(\w+,\w+\)'
+          '\[\w+(,\w+)*\]))*', pstr):
         raise ValueError('Invalid bond substring \'%s\''%pstr)
       for t0,l0,t1,l1 in re.findall(r'\b(\w+)\.(\w+)-(\w+)\.(\w+)\b',pstr):
         try:
-          T0 = Net._tlist[tdict[t0]]
-          T1 = Net._tlist[tdict[t1]]
+          T0 = tobjdict[t0]
+          T1 = tobjdict[t1]
           c = conj[t0]^conj[t1]
           assert l0 not in Net._tbonds[t0] and l1 not in Net._tbonds[t1]
         except KeyError:
@@ -107,6 +112,27 @@ class Network:
         Net._tbonds[t1][l1] = (t0,l0)
         Net._bonded[t0].add(t1)
         Net._bonded[t1].add(t0)
+      for t0,t1,ls in re.findall(r'\((\w+),(\w+)\)\[([\w,]+)\]',pstr):
+        ls = ls.split(',')
+        for t in (t0,t1):
+          if t not in tdict:
+            raise KeyError('Tensor %s absent'%t)
+        c = conj[t0]^conj[t1]
+        T0 = tobjdict[t0]
+        T1 = tobjdict[t1]
+        for ll in ls:
+          for t in (t0,t1):
+            if ll not in tobjdict[t]:
+              raise KeyError('Index %s.%s absent'%(t,ll))
+            if ll in Net._tbonds[t]:
+              raise ValueError('Index %s.%s repeated'%(t,ll))
+          if compat and not T0._dspace[ll].cmp(T1._dspace[ll], not c):
+            raise ValueError('Index %s of %s and %s cannot be contracted' \
+              % (ll,t0,t1))
+          Net._tbonds[t0][ll] = (t1,ll)
+          Net._tbonds[t1][ll] = (t0,ll)
+        Net._bonded[t0].add(t1)
+        Net._bonded[t1].add(t0)
     if len(substrs) == N+2:
       pstr = substrs[-1]
       if not re.fullmatch(r'(?!,)((,|^)\w+\.\w+\>\w+)*(,?(\~|\#))?',pstr):
@@ -118,12 +144,10 @@ class Network:
       else:
         auto = strict = False
       for t,l0,l1 in re.findall(r'\b(\w+)\.(\w+)\>(\w+)\b',pstr):
-        try:
-          T = Net._tlist[tdict[t]]
-        except KeyError:
+        if t not in tdict:
           raise KeyError('Tensor %s absent'%t)
-        if l0 not in T:
-          raise KeyError('Tensor %s does not have index %s'%l0)
+        if l0 not in tobjdict[t]:
+          raise KeyError('Tensor %s does not have index %s'%(t,l0))
         if l0 in Net._tbonds[t]:
           raise ValueError('Bonded index %s.%s assigned output name'%(t,l0))
         if l0 in Net._tout[t]:
@@ -654,6 +678,8 @@ class Network:
         else:
           minus = minus[:-1]
         mode = 'auto'
+        if not isinstance(out,dict):
+          out = {}
       elif out == 'auto':
         mode = 'auto'
         out = {}
@@ -801,6 +827,7 @@ class Network:
     outr = {l:l for l in outr}
     #print(Tl._idxs,Tl._T.shape,Tr._idxs,Tr._T.shape,contracted)
     Tc = Tl._do_contract(Tr, contracted, outl, outr, cl^cr)
+    del Tl,Tr
     for tt in rcontract:
       if tt not in lleaves:
         lcontract[tt] |= rcontract[tt]

@@ -148,6 +148,12 @@ class Tensor:
   def __shape_copy(self):
     return tuple(vs.dim for vs in self._spaces)
 
+  def __getstate__(self):
+    return self._T, self._idxs, self._spaces
+
+  def __setstate__(self, initargs):
+    self.__init__(*initargs)
+
   @property
   def dshape(self):
     return {ll:self._dspace[ll].dim for ll in self._idxs}
@@ -265,7 +271,7 @@ class Tensor:
         vs.append(~V)
       else:
         vs.append(V)
-    return cls(T, idxs, vs)
+    return cls(T, idxs, tuple(vs))
 
   def permuted(self, order):
     """Return tensor permuted according to order"""
@@ -998,8 +1004,8 @@ class Tensor:
         raise ValueError('Invalid substring %s'%substrs[1])
       if not re.fullmatch(r'(\w+\>\w+(,(?=\w)|$|,?(?=\~)))*\~?',substrs[2]):
         raise ValueError('Invalid substring %s'%substrs[2])
-      auto1 = (substrs[1][-1] == '~')
-      auto2 = (substrs[2][-1] == '~')
+      auto1 = (substrs[1] and substrs[1][-1] == '~')
+      auto2 = (substrs[2] and substrs[2][-1] == '~')
       out1 = dict(re.findall(r'\b(\w+)\>(\w+)\b',substrs[1]))
       out2 = dict(re.findall(r'\b(\w+)\>(\w+)\b',substrs[2]))
     else:
@@ -1157,7 +1163,7 @@ class Tensor:
     return self._tensorfactory(T, tuple(idxs), tuple(newvs))
 
   def svd(self, parsestr, chi=None, tolerance=1e-12, chi_ratio=2.,
-      sv_tensor=False):
+      sv_tensor=False, discard=False):
     """Performs svd on self
     parsestr will be of the form
       l0,l1|cc|r0,r1,r2 (cc might be cl,cr)
@@ -1170,7 +1176,8 @@ class Tensor:
     Optional tolerance is the minimum singular value
     chi_ratio*chi will be the maximum acceptable final value of chi
       if float, else will be simply chi_ratio
-    sv_tensor indicates whether the singular values are returned as a tensor"""
+    sv_tensor indicates whether the singular values are returned as a tensor
+    if discard, delete array associated with tensor to clear space"""
     m = re.fullmatch(r'((?:\w+(?:,|(?=\|)))+)\|(\w+(?:,\w+)?)\|((?:(?:(?<=\|)|,)\w+)+|\~)',parsestr)
     if not m:
       raise ValueError('Invalid argument %s'%parsestr)
@@ -1212,6 +1219,8 @@ class Tensor:
       raise ValueError('Center indices must be distinct if singular values'
         ' are reported as tensor')
     M,info = self._do_fuse((0,ls),(1,rs))
+    if discard:
+      del self._T
     try:
       U,s,V = M._do_svd(chi, tolerance, chi_ratio, sv_tensor)
     except MemoryError as me:
@@ -1345,7 +1354,7 @@ class Tensor:
 
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,
-      mat=False):
+      mat=False, discard=False, zero_tol=None):
     """Gets eigenvalue-eigenvector pairs of Tensor, with target space described
     by left indices
     herm determines whether or not the matrix being diagonalized is treated as
@@ -1355,12 +1364,16 @@ class Tensor:
       or (min,max)
       If Hermitian flag is set, will order lowest to highest value
       (as in linalg.eigh). Otherwise will order highest to lowest magnitude.
+    if zero_tol is set, will cut out eigenvectors with magnitude below the 
+      given threshold
     Returns w, v. If mat, will return v as a Tensor (see e.g. svd);
       otherwise will return lists; if specified as string, will be index
       (otherwise 'c')
     If left, will return eigenvalues, right eigenvectors, left eigenvectors
     If vecs=False (and mat=False), will return eigenvalues only"""
     A, info = self._do_fuse((0,lidx),(1,ridx,0,True))
+    if discard:
+      del self._T
     N = A.shape[0]
     if selection is not None:
       if isinstance(selection, int):
@@ -1378,6 +1391,11 @@ class Tensor:
     if vecs:
       if herm:
         w, v = linalg.eigh(A._T, eigvals=selection)
+        if zero_tol is not None:
+          s0 = sum(w < -thresh)
+          ncut = sum(w[s0:] < thresh)
+          w = np.delete(w, slice(s0,s0+ncut), 0)
+          v = np.delete(v, slice(s0,s0+ncut), 1)
         if left:
           vl = v
       else:
@@ -1385,6 +1403,13 @@ class Tensor:
           w, vl, v = linalg.eig(A, left=True)
         else:
           w, v = linalg.eig(A, left=False)
+        if zero_tol is not None:
+          chi = sum(np.abs(w) > thresh)
+          if selection:
+            selection = (selection[0], min(selection[1],chi-1))
+            nn = selection[1] - selection[0] + 1
+          else:
+            selection = (0,chi-1)
         if selection:
           idxw = np.argsort(-np.abs(w))
           # Sort eigenvalues, eigenvectors
@@ -1460,6 +1485,111 @@ class Tensor:
         M = M._do_contract(self, contracted, outl, outr, False)
       return M
 
+  @classmethod
+  def identify_indices(cls, idxs, *tens):
+    if not isinstance(idxs,str):
+      raise ValueError('first argument must be string')
+    if not all(isinstance(t, cls) for t in tens):
+      raise TypeError('subsequent arguments must be Tensors')
+    for clause in idxs.split(','):
+      if re.fullmatch(r'\d+\.\w+(-\d+\.\w+\*?)*', clause):
+        n_idxs = re.findall(r'(\d+)\.(\w+)')
+      else:
+        if not re.fullmatch(r'\w+(-\w+\*?)*', clause):
+          raise ValueError('could not process argument \'%s\''%clause)
+        idxl = clause.split('-')
+        if len(tens) == 1:
+          n_idxs = [(0,x) for x in idxl]
+        elif len(tens) == len(idxl):
+          n_idxs = [(i,idxl[i]) for i in range(len(tens))]
+        else:
+          raise ValueError('Expected length-%d clause without tensors'
+            ' specified, got length-%d'%(len(tens),len(idxl)))
+      t0,l0 = n_idxs[0]
+      if t0 >= len(tens):
+        raise ValueError('Got %d arguments, expected at least %d' \
+          % (len(tens), t0+1))
+      if l0 not in tens[t0]:
+        raise ValueError('Tensor #%d does not have index %s'%(t0,l0))
+      V0 = tens[t0]._dspace[l0]
+      if not isinstance(V0, links.VectorSpaceTracked):
+        raise ValueError('Only tracked vector spaces are to be identified '
+          'with each other')
+      for t1,l1 in n_idxs[1:]:
+        if t1 >= len(tens):
+          raise ValueError('Got %d arguments, expected at least %d' \
+            % (len(tens), t1+1))
+        c = (l1[-1] == '*')
+        if c:
+          ll = l1[:-1]
+        else:
+          ll = l1
+        if ll not in tens[t1]:
+          raise ValueError('Tensor #%d does not have index %s'%(t1,l1l))
+        V1 = tens[t1]._dspace[ll]
+        if V0.dim != V1.dim:
+          raise ValueError('Can only identify vector spaces with the same'
+            ' dimension')
+        if c:
+          if V0._VectorSpaceTracked__dual is None:
+            V0._VectorSpaceTracked__dual = V1
+            if V1._VectorSpaceTracked__dual is None:
+              # Assign as each others' duals
+              V1._VectorSpaceTracked__dual = V0
+            else:
+              # Just assign V1 as dual of V0
+              cls._reassign_space_as(V1.dual(),V0)
+          elif V1._VectorSpaceTracked__dual is None:
+            cls._reassign_space_as(V1,V0.dual())
+          elif V0 is V1:
+            # Creating `real' vector space
+            cls._reassign_space_as(V1,V0)
+          else:
+            cls._reassign_space_as(V1,V0.dual())
+            cls._reassign_space_as(V1.dual(),V0)
+        elif V0 is V1:
+          continue
+        else:
+          if V0._VectorSpaceTracked__dual is None:
+            if V1._VectorSpaceTracked__dual is not None:
+              V0._VectorSpaceTracked__dual = V1.dual()
+          elif V1._VectorSpaceTracked__dual is not None:
+            if V1.dual() is V0:
+              # Creating real space
+              V0._VectorSpaceTracked__dual = V0
+            else:
+              cls._reassign_space_as(V1.dual(),V0.dual())
+          cls._reassign_space_as(V1,V0)
+
+  @classmethod
+  def _reassign_space_as(cls, V1, V0):
+    # Find all tensors that include vector space V1 and change it to V0
+    import gc
+    # Find tuples that refer to V1
+    for r1 in gc.get_referrers(V1):
+      if isinstance(r1,tuple):
+        # Determine if it is the _spaces attribute of some Tensor
+        tref = None
+        for r2 in gc.get_referrers(r1):
+          if isinstance(r2,dict) and '_spaces' in r2 and r2['_spaces'] is r1:
+            for r3 in gc.get_referrers(r2):
+              if isinstance(r3,Tensor) and r3.__dict__ is r2:
+                tref = r3
+                break
+            if tref is not None:
+              break
+        if tref is None:
+          continue
+        # Find instances of V1 in tref._spaces
+        i0 = 0
+        newspaces = list(tref._spaces)
+        for ii in range(r1.count(V1)):
+          # Next instance
+          it = r1.index(V1,i0)
+          tref._dspace[tref._idxs[it]] = V0
+          newspaces[it] = V0
+        tref._spaces = tuple(newspaces)
+
 
 class TensorTransposedView(Tensor):
   """View for tensor with indices renamed"""
@@ -1483,6 +1613,9 @@ class TensorTransposedView(Tensor):
 
   def __copy__(self):
     return self._tensorfactory(copy(self._T), self._idxs, self._spaces)
+
+  def __getstate__(self):
+    return self.__tensor, self.__idxdict
 
 
 class dictproperty:

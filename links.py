@@ -35,6 +35,7 @@ class VSAbstract(ABC):
     else:
       return self == W
 
+
 class VectorSpace(VSAbstract):
   """Basic class to represent vector spaces. Only attribute is dim"""
   
@@ -49,6 +50,7 @@ class VectorSpace(VSAbstract):
 
   def __xor__(self, W):
     return self._dimension == W._dimension
+
 
 class VectorSpaceTracked(VSAbstract):
   """Represent vector spaces in a way capable of sophisticated identification
@@ -69,6 +71,7 @@ class VectorSpaceTracked(VSAbstract):
 
   def __xor__(self,W):
     return self.__dual is W
+
 
 class TensorIndexDict:
   """Property-type descriptor for accessing information contained in VSpace
