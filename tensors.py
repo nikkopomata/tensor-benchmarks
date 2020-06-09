@@ -16,7 +16,7 @@ from . import config
 
 def _np_rand(shape, gen=rand.randn):
   """Get np.ndarray with appropriate features"""
-  T = gen(*shape)
+  T = gen(*shape).astype(config.FIELD)
   if config.FIELD is complex:
     T += 1j*gen(*shape)
   return T
@@ -1381,7 +1381,6 @@ class Tensor:
           selection = (selection%N,N-1)
         else:
           selection = (0, selection-1)
-        selection = None
       elif not isinstance(selection, tuple):
         raise ValueError('selection argument must be integer or tuple')
       nn = selection[1] - selection[0] + 1
@@ -1392,24 +1391,31 @@ class Tensor:
       if herm:
         w, v = linalg.eigh(A._T, eigvals=selection)
         if zero_tol is not None:
-          s0 = sum(w < -thresh)
-          ncut = sum(w[s0:] < thresh)
+          w0 = max(np.abs(w))
+          s0 = sum(w < -w0*zero_tol)
+          ncut = sum(w[s0:] < w0*zero_tol)
           w = np.delete(w, slice(s0,s0+ncut), 0)
           v = np.delete(v, slice(s0,s0+ncut), 1)
+          nn -= ncut
         if left:
           vl = v
       else:
         if left:
-          w, vl, v = linalg.eig(A, left=True)
+          w, vl, v = linalg.eig(A._T, left=True)
+          # Does not return dual basis of eigenvalues
+          for i in range(vl.shape[1]):
+            vl[:,i] /= vl[:,i].dot(v[:,i].conj())
         else:
-          w, v = linalg.eig(A, left=False)
+          w, v = linalg.eig(A._T, left=False)
         if zero_tol is not None:
-          chi = sum(np.abs(w) > thresh)
+          w0 = max(np.abs(w))
+          chi = sum(np.abs(w) > w0*zero_tol)
           if selection:
             selection = (selection[0], min(selection[1],chi-1))
             nn = selection[1] - selection[0] + 1
           else:
             selection = (0,chi-1)
+            nn = chi
         if selection:
           idxw = np.argsort(-np.abs(w))
           # Sort eigenvalues, eigenvectors
