@@ -40,7 +40,7 @@ class VectorSpace(VSAbstract):
   """Basic class to represent vector spaces. Only attribute is dim"""
   
   def __init__(self, dim):
-    self._dimension = dim
+    self._dimension = int(dim)
 
   def dual(self):
     return self
@@ -56,9 +56,38 @@ class VectorSpaceTracked(VSAbstract):
   """Represent vector spaces in a way capable of sophisticated identification
   between spaces"""
 
+  VSided = {}
+
+  def __new__(cls, *args, **kw_args):
+    if 'vsid' in kw_args:
+      vsid = kw_args.pop('vsid')
+      dualid = kw_args.pop('dual')
+      #print('initializing',vsid,dualid)
+      dim = args[0]
+      if vsid in cls.VSided:
+        if cls.VSided[vsid].__dual.__vsid != dualid:
+          raise ValueError('vector-space ID of dual changed between pickling'
+            ' (%s->%s)'%(cls.VSided[vsid].__dual.__vsid,dualid))
+        if cls.VSided[vsid]._dimension != dim:
+          raise ValueError('dimensions indicate vector-space collision')
+        return cls.VSided[vsid]
+      else:
+        obj = super(VectorSpaceTracked,cls).__new__(cls, *args[1:], **kw_args)
+        obj.__init__(dim)
+        obj.__vsid = vsid
+        cls.VSided[vsid] = obj
+        obj.dual().__vsid = dualid
+        cls.VSided[dualid] = obj.__dual
+        #assert obj.__dual.__vsid == dualid
+        #assert obj.__dual.__dual is obj
+        #print(vsid,dualid)
+        return obj
+    return super(VectorSpaceTracked,cls).__new__(cls, *args[1:], **kw_args)
+
   def __init__(self, dim, dual=None):
-    self._dimension = dim
+    self._dimension = int(dim)
     self.__dual = dual
+    self.__vsid = None
 
   def dual(self):
     if self.__dual is None:
@@ -71,6 +100,21 @@ class VectorSpaceTracked(VSAbstract):
 
   def __xor__(self,W):
     return self.__dual is W
+
+  def __gen_id(self):
+    from numpy import random
+    vsid = random.randint(2**30)
+    while vsid in self.__class__.VSided:
+      vsid = random.randint(2**30)
+    self.__vsid = vsid
+    self.__class__.VSided[vsid] = self
+
+  def __getnewargs_ex__(self):
+    if self.__vsid is None:
+      self.__gen_id()
+    if self.dual().__vsid is None:
+      self.__dual.__gen_id()
+    return ((self._dimension,),{'vsid':self.__vsid, 'dual':self.__dual.__vsid})
 
 
 class TensorIndexDict:

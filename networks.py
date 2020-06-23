@@ -863,6 +863,7 @@ class Network:
       cpy._tout[t].update(self._tout[t])
       cpy._tbonds[t].update(self._tbonds[t])
     cpy._out = dict(self._out)
+    cpy._bonded = deepcopy(self._bonded)
     cpy._tree = copy(self._tree)
     return cpy
 
@@ -915,7 +916,9 @@ class Network:
             contracted *= bonddim[t0,t1]
         for t0 in scomp:
           rfree *= bonddim[t0]
-        if memcap and (lfree*contracted > memcap or rfree*contracted > memcap):
+        #print(np.log(contracted)/np.log(2),np.log(lfree)/np.log(2),np.log(rfree)/np.log(2))
+        if memcap and (contracted > memcap or lfree > memcap or rfree > memcap \
+            or lfree*contracted > memcap or rfree*contracted > memcap):
           continue
         stepexp.append((sub,comp,lfree*rfree*contracted))
         resdict[comp] = None
@@ -926,6 +929,7 @@ class Network:
     except OptimizationOverflow:
       raise ValueError('Network optimization could not be found within memory'
         ' limit %0.2fGiB'%(memcap/2**30))
+    self.memexpense(tree,reorder=True)
     self._tree = tree
     
   def __optimize_child_simple(self, tlist, bonddim, resdict, expmin):
@@ -1058,6 +1062,63 @@ class Network:
       if t1 in rcont:
         rcont[t1] *= lcont[t1]
     return exp, lfree*rfree, rcont
+
+  def memexpense(self, tree, root=True, reorder=False):
+    """Determine spatial complexity of contraction order given by NetworkTree"""
+    if not tree:
+      tree = self.tree
+    if isinstance(tree.left, NetworkTree):
+      ltens = tree.left.leaves
+      lmem,lfree,lcont = self.memexpense(tree.left,False,reorder)
+    else:
+      t = tree.left
+      T = self._tlist[self._tdict[t]]
+      lfree = 1
+      lcont = {t1:1 for t1 in self._bonded[t]}
+      bonds = self._tbonds[t]
+      for l in T._idxs:
+        d = T.shape[l]
+        if l in bonds:
+          lcont[bonds[l][0]] *= d
+        else:
+          lfree *= d
+      ltens = {t}
+      lmem = 0
+    lx = lfree*functools.reduce(int.__mul__, lcont.values())
+    if isinstance(tree.right, NetworkTree):
+      rtens = tree.right.leaves
+      rmem,rfree,rcont = self.memexpense(tree.right,False,reorder)
+    else:
+      t = tree.right
+      T = self._tlist[self._tdict[t]]
+      rfree = 1
+      rcont = {t1:1 for t1 in self._bonded[t]}
+      bonds = self._tbonds[t]
+      for l in T._idxs:
+        d = T.shape[l]
+        if l in bonds:
+          rcont[bonds[l][0]] *= d
+        else:
+          rfree *= d
+      rtens = {t}
+      rmem = 0
+    rx = rfree*functools.reduce(int.__mul__, rcont.values())
+    if reorder and rmem+lx > lmem+rx:
+      tree.left,tree.right = tree.right,tree.left
+      tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
+      mem = lmem+rx
+    else:
+      mem = rmem+lx
+    if root:
+      return mem
+    cont = {}
+    for t1 in (set(lcont.keys()) | set(rcont.keys())) - ltens - rtens:
+      cont[t1] = 1
+      if t1 in lcont:
+        cont[t1] *= lcont[t1]
+      if t1 in rcont:
+        cont[t1] *= rcont[t1]
+    return mem, lfree*rfree, cont
 
 
 class SubnetworkView(Network):

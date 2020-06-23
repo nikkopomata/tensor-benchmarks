@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import sparse,linalg
 import scipy.sparse.linalg
-from .tensors import Tensor
+from .tensors import Tensor,FusionPrimitive
 
 from . import links, config, networks
 from copy import copy,deepcopy
@@ -13,18 +13,25 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
   Functional subclass is NetworkOperator; otherwise processes sums, products,
   etc."""
 
-  def _derive_in(self, Oin):
-    """Identifying features of domain based on operator with same domain"""
-    self._fuse_in = Oin._fuse_in
-    self._idx_in = Oin._idx_in
-    self._Vin = Oin._Vin
-    self._tensor_constructor = Oin._tensor_constructor
+  @property
+  def is_endomorphic(self):
+    return self._fuse_in is self._fuse_out
 
-  def _derive_out(self, Oout):
-    """Identifying features of range based on operator with same range"""
-    self._fuse_out = Oout._fuse_out
-    self._idx_out = Oout._idx_out
-    self._Vout = Oout._Vout
+  @property
+  def idx_in(self):
+    return self._fuse_in._idxs
+
+  @property
+  def Vin(self):
+    return self._fuse_in._out
+
+  @property
+  def Vout(self):
+    return self._fuse_out._out
+
+  @property
+  def idx_out(self):
+    return self._fuse_out._idxs
 
   def _matvec(self, v):
     if config.lin_iter_verbose:
@@ -38,8 +45,6 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     if config.lin_iter_verbose:
       print('Iteration (adjoint) #%d'%self.iters,flush=config.flush)
     self.iters += 1
-    if not self.has_adjoint:
-      raise NotImplementedError()
     T0 = self.tensor_adjoint_in(v)
     T1 = self.adjoint_tensor_action(T0)
     return self.vector_adjoint_out(T1)
@@ -56,23 +61,23 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     """Convert input vector to Tensor"""
     if len(v.shape) == 2:
       v = v.flatten()
-    T0 = self._tensor_constructor(v, (0,), (self._Vin,))
-    return T0._do_unfuse({0:(self._idx_in,False)+self._fuse_in[1:]})
+    T0 = self._fuse_in.tensorclass(v, (0,), (self.Vin,))
+    return T0._do_unfuse({0:(self.idx_in,self._fuse_in)})
 
   def vector_out(self, T):
     """Convert output Tensor to vector"""
-    return T._do_fuse((0,self._idx_out,self._fuse_out,False))[0]._T
+    return T._do_fuse((0,self.idx_out),prims={0:self._fuse_out})[0]._T
 
   def tensor_adjoint_in(self, v):
     """Convert input vector to Tensor"""
     if len(v.shape) == 2:
       v = v.flatten()
-    T0 = self._tensor_constructor(v, (0,), (self._Vout))
-    return T0._do_unfuse({0:(self._idx_out,False)+self._fuse_out[1:]})
+    T0 = self._fuse_out.tensorclass(v, (0,), (self.Vout,))
+    return T0._do_unfuse({0:(self.idx_out,self._fuse_out)})
 
   def vector_adjoint_out(self, T):
     """Convert output Tensor to vector"""
-    return T._do_fuse((0,self._idx_in,self._fuse_in,False))._T
+    return T._do_fuse((0,self.idx_in),prims={0:self._fuse_in})[0]._T
 
   @property
   def dtype(self):
@@ -80,7 +85,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
 
   @property
   def shape(self):
-    return (self._Vout.dim, self._Vin.dim)
+    return (self.Vout.dim, self.Vin.dim)
 
   def scalar_times(self, factor):
     return ScaledOperator(self, factor)
@@ -175,8 +180,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
   def H(self):
     return self.adjoint()
 
-  def eigs(self, k, herm=True, vecs=True, nv=None, which='LM', maxiter=None,
-      guess=None):
+  def eigs(self, k, herm=True, vecs=True, nv=None, guess=None, **eigs_kw):
     """Eigendecomposition of linear transformation obtained from network,
     using ARPACK methods
     k is the number of eigenvalues to collect
@@ -194,10 +198,10 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     self.iters = 0
     if herm:
       rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
-        which=which,v0=guess,maxiter=maxiter)
+        v0=guess,**eigs_kw)
     else:
       rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
-        which=which,v0=guess,maxiter=maxiter)
+        v0=guess,**eigs_kw)
     if not vecs:
       return rv
     w, vs = rv
@@ -219,9 +223,7 @@ class NetworkOperator(TensorOperator):
     self.network = copy(net)
     self._t0 = t
     T0 = self.network[t]
-    self._tensor_constructor = T0.__class__
-    self._idx_in = T0._idxs
-    self._fuse_in = T0._get_fuse_info((0,T0._idxs))[0]
+    self._fuse_in = FusionPrimitive(T0._idxs,T0)
     try:
       idx = next(self.network.freeindices(unsetonly=True))
     except:
@@ -235,7 +237,6 @@ class NetworkOperator(TensorOperator):
         if l not in T0._idxs or not self.network[t1]._dspace[ll]==T0._dspace[l]:
           raise ValueError('Index %s.%s>%s does not match'%(t1,ll,l))
       self._fuse_out = self._fuse_in
-      self._idx_out = self._idx_in
     else:
       vs = []
       idxs = []
@@ -243,15 +244,9 @@ class NetworkOperator(TensorOperator):
         l = outdict[t1,ll]
         idxs.append(l)
         vs.append(self.network[t1]._dspace[ll])
-      T1 = Tensor(None, idxs, tuple(vs))
-      self._fuse_out = T1._get_fuse_info((0,idxs))[0]
-      self._idx_out = tuple(idxs)
-    self.is_endomorphic = bool(endomorphism)
-    self._Vin = self._fuse_in[0]
-    self._Vout = self._fuse_out[0]
-    #if adjoint_order is not None:
+      self._fuse_out = FusionPrimitive(vs, idx_in=idxs)
+      T1 = self._fuse_out.zeros_like()
     # Create network representing transposed action
-    self.has_adjoint = True
     if endomorphism:
       T1 = T0
     bondstrs = []
@@ -275,9 +270,6 @@ class NetworkOperator(TensorOperator):
     else:
       self.transposed_net.optimize()
     self.adjoint_net = self.transposed_net.conj()
-    #else:
-      #self.has_adjoint = False
-      #self.transposed_net = None
 
   def tensor_action(self, T):
     self.network[self._t0] = T
@@ -299,18 +291,9 @@ class NetworkOperator(TensorOperator):
 
 class AdjointOperator(TensorOperator):
   def __init__(self, base):
-    if not base.has_adjoint:
-      raise NotImplementedError()
     self._base_operator = base
     self._fuse_in = base._fuse_out
-    self._idx_in = base._idx_out
-    self._Vin = base._Vout
-    self._tensor_constructor = base._tensor_constructor
     self._fuse_out = base._fuse_in
-    self._idx_out = base._idx_in
-    self._Vout = base._Vin
-    self.has_adjoint = True
-    self.is_endomorphic = base.is_endomorphic
 
   def tensor_action(self, T):
     return self._base_operator.adjoint_tensor_action(T)
@@ -330,19 +313,13 @@ class AdjointOperator(TensorOperator):
 
 class TransposedOperator(TensorOperator):
   def __init__(self, base):
-    if not base.has_adjoint:
-      raise NotImplementedError()
     self._base_operator = base
-    self._idx_in = base._idx_out
-    self._Vin = ~base._Vout
-    self._idx_out = base._idx_in
-    self._Vout = ~base._Vin
-    self._fuse_in = (self._Vin,(~v for v in base._fuse_out))
-    self._tensor_constructor = base._tensor_constructor
-    self._fuse_out = (self._Vout,(~v for v in base._fuse_in))
+    self._fuse_in = base._fuse_out.conj()
+    if base.is_endomorphic:
+      self._fuse_out = self._fuse_in
+    else:
+      self._fuse_out = base._fuse_in.conj()
     self._net = base.transposed_net
-    self.has_adjoint = True
-    self.is_endomorphic = base.is_endomorphic
 
   def tensor_action(self, T):
     self._net.replace(self._base_operator._t0, T, c=False)
@@ -364,15 +341,11 @@ class TransposedOperator(TensorOperator):
 class ConjugatedOperator(TensorOperator):
   def __init__(self, base):
     self._base_operator = base
-    self._idx_in = base._idx_in
-    self._Vin = ~base._Vin
-    self._idx_out = base._idx_out
-    self._Vout = ~base._Vout
-    self._fuse_in = (self._Vin,(~v for v in base._fuse_in))
-    self._tensor_constructor = base._tensor_constructor
-    self._fuse_out = (self._Vout,(~v for v in base._fuse_out))
-    self.has_adjoint = base.has_adjoint
-    self.is_endomorphic = base.is_endomorphic
+    self._fuse_in = base._fuse_in.conj()
+    if base.is_endomorphic:
+      self._fuse_out = self._fuse_in
+    else:
+      self._fuse_out = base._fuse_out.conj()
 
   def tensor_action(self, T):
     return self._base_operator.tensor_action(T.conj()).conj()
@@ -396,10 +369,8 @@ class ScaledOperator(TensorOperator):
   def __init__(self, base, factor):
     self._base_operator = base
     self._coefficient = factor
-    self.has_adjoint = base.has_adjoint
-    self._derive_in(base)
-    self._derive_out(base)
-    self.is_endomorphic = base.is_endomorphic
+    self._fuse_in = base._fuse_in
+    self._fuse_out = base._fuse_out
 
   def tensor_action(self, T):
     return self._coefficient * self._base_operator.tensor_action(T)
@@ -425,12 +396,13 @@ class ScaledOperator(TensorOperator):
 
 class SumOperator(TensorOperator):
   def __init__(self, base1, base2):
+    if not base1._fuse_in.cmp(base2._fuse_in) or \
+        not base1._fuse_out.cmp(base2._fuse_out):
+      raise ValueError('Operators are not summable')
     self._base_op1 = base1
     self._base_op2 = base2
-    self.has_adjoint = base1.has_adjoint and base2.has_adjoint
-    self.is_endomorphic = base1.is_endomorphic or base2.is_endomorphic
-    self._derive_in(base1)
-    self._derive_out(base1)
+    self._fuse_in = base1._fuse_in
+    self._fuse_out = base1._fuse_out
 
   def tensor_action(self, T):
     return self._base_op1.tensor_action(T) + self._base_op2.tensor_action(T)
@@ -456,38 +428,40 @@ class SumOperator(TensorOperator):
 
 
 class ProductOperator(TensorOperator):
-  def __init__(self, base1, base2):
-    if isinstance(base2, ScaledOperator):
+  def __init__(self, left, right):
+    if not left._fuse_in.cmp(right._fuse_out):
+      raise ValueError('Operators cannot be composed')
+    if isinstance(right, ScaledOperator):
       # Shift coefficient to the 1st factor
-      base1 = base1.scalar_times(base2._coefficient)
-      base2 = base2._base_operator
-    self._base_op1 = base1
-    self._base_op2 = base2
-    self.has_adjoint = base1.has_adjoint and base2.has_adjoint
-    self._derive_in(base2)
-    self._derive_out(base1)
-    self.is_endomorphic = (base1.is_endomorphic and base2.is_endomorphic) \
-      or (base1._fuse_in == base2._fuse_out)
+      left = left.scalar_times(right._coefficient)
+      right = right._base_operator
+    self._op_left = left
+    self._op_right = right
+    self._fuse_in = right._fuse_in
+    if self._fuse_in.cmp(left._fuse_out):
+      self._fuse_out = self._fuse_in
+    else:
+      self._fuse_out = left._fuse_out
 
   def tensor_action(self, T):
-    return self._base_op1.tensor_action(self._base_op2.tensor_action(T))
+    return self._op_left.tensor_action(self._op_right.tensor_action(T))
   
   def adjoint_tensor_action(self, T):
-    T1 = self._base_op1.adjoint_tensor_action(T)
-    return self._base_op2.adjoint_tensor_action(T1)
+    T1 = self._op_left.adjoint_tensor_action(T)
+    return self._op_right.adjoint_tensor_action(T1)
 
   def scalar_times(self, factor):
-    return ProductOperator(self._base_op1.scalar_times(factor), self._base_op2)
+    return ProductOperator(self._op_left.scalar_times(factor), self._op_right)
 
   def transpose(self):
-    return ProductOperator(self._base_op2.transpose(),
-        self._base_op1.transpose())
+    return ProductOperator(self._op_right.transpose(),
+        self._op_left.transpose())
 
   def adjoint(self):
-    return ProductOperator(self._base_op2.adjoint(), self._base_op1.adjoint())
+    return ProductOperator(self._op_right.adjoint(), self._op_left.adjoint())
 
   def conj(self):
-    return ProductOperator(self._base_op1.conj(), self._base_op2.conj())
+    return ProductOperator(self._op_left.conj(), self._op_right.conj())
 
 
 class IdentityOperator(TensorOperator):
@@ -496,17 +470,14 @@ class IdentityOperator(TensorOperator):
       if not base.is_endomorphic:
         raise ValueError('Can only derive identity operator from endomorphic'
           ' operator')
-      self.has_adjoint = True
-      self._derive_in(base)
-      self._derive_out(base)
-    elif isinstance(base, tuple):
-      self._idx_in, self._fuse_in, self._tensor_constructor = base
-      self._idx_out = self._idx_in
-      self._fuse_out = self._fuse_in
-      self._Vin = self._Vout = self._fuse_in[0]
+      self._fuse_in = base._fuse_in
+    elif isinstance(base, FusionPrimitive):
+      self._fuse_in = base
+    elif isinstance(base, Tensor):
+      self._fuse_in = FusionPrimitive(base._idxs,base)
     else:
       raise NotImplementedError()
-    self.is_endomorphic = True
+    self._fuse_out = self._fuse_in
 
   def tensor_action(self, T):
     return T
@@ -518,7 +489,7 @@ class IdentityOperator(TensorOperator):
     return self
 
   def transpose(self):
-    return IdentityOperator(self._idx_in, (~self._Vin,(~v for v in self._fuse_in[1])),self._tensor_constructor)
+    return IdentityOperator(self._fuse_in.conj())
 
   def conj(self):
     return self.transpose()

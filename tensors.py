@@ -76,7 +76,8 @@ class Tensor:
     self._spaces = spaces
     rank = len(self._spaces)
     self._dspace = {idxs[i]: spaces[i] for i in range(rank)}
-    self.shape = dictproperty(self.__shape_get, None, self.__shape_has, self.__shape_copy)
+    self.shape = dictproperty(self.__shape_get, None, self.__shape_has,
+      self.__shape_copy)
 
   @classmethod
   def tensor(cls, t, idxs):
@@ -152,6 +153,7 @@ class Tensor:
     return self._T, self._idxs, self._spaces
 
   def __setstate__(self, initargs):
+    #print(initargs[1])
     self.__init__(*initargs)
 
   @property
@@ -774,15 +776,9 @@ class Tensor:
           except:
             raise ValueError('argument #%d not dictionary with key %s' \
               % (argi,l0))
-        try:
-          V,vs0 = specinfo[:2]
-          assert isinstance(V,links.VSpace)
-        except:
-          raise ValueError('argument #%d not of proper type'%argi)
-        for ii in range(len(vs)):
-          if not vs[ii].cmp(vs0[ii],conj):
-            raise ValueError('index \'%s\' paired with non-matching index in '
-              'argument #%d' % (subidxs[ii],argi))
+        if not isinstance(specinfo, FusionPrimitive):
+          raise ValueError('argument #%d not a fusion primitive'%argi)
+        specinfo.matchtensor(self, subidxs, conj)
         args.append((l1,subidxs,specinfo,conj))
       else:
         args.append((l1,subidxs))
@@ -796,67 +792,48 @@ class Tensor:
       return fused
     return fused,info
 
-  def _get_fuse_info(self, *args):
+  def _get_fuse_prim(self, *args):
     """Produce 'info' dictionary to be used within _do_fuse"""
     infos = {}
     for arg in args:
       if len(arg) == 2:
         l1,l0s = arg
-        if len(l0s) == 1:
-          # Remains as-is
-          l0 = l0s[0]
-          V = self._dspace[l0]
-          infos[l1] = (V,(V,))
-        else:
-          dim = 1
-          vs = []
-          for ll in l0s:
-            V0 = self._dspace[ll]
-            vs.append(V0)
-            dim *= V0.dim
-          V = links.VSpace(dim)
-          infos[l1] = (V,tuple(vs))
+        infos[l1] = FusionPrimitive(l0s,self)
       else:
         assert len(arg) == 4
-        l1,l0s,info,conj = arg
-        if not isinstance(info,tuple):
+        l1,l0s,fusion,conj = arg
+        if not isinstance(fusion,FusionPrimitive):
           # Is previously-supplied index
-          info = infos[info]
-        assert len(info) == 2 and len(l0s) == len(info[1])
-        V0 = info[0]
-        vs0 = info[1]
+          fusion = infos[fusion]
+        assert len(l0s) == fusion.rank
         if conj:
-          V = ~V0
-          vs = tuple(~vv for vv in vs0)
+          infos[l1] = fusion.conj()
         else:
-          V = V0
-          vs = tuple(vs0)
-        infos[l1] = (V,vs)
+          infos[l1] = fusion
     return infos
 
-  def _do_fuse(self, *args, infos=None):
+  def _do_fuse(self, *args, prims=None):
     """Fuse based on list of tuples
     (new idx, old idxs, info/reference to previous, conj. bool)"""
     neworder = []
     newshape = []
     permutation = []
     newvs = []
-    if infos is None: # Provided if computation is being repeated
-      infos = self._get_fuse_info(*args)
+    if prims is None: # Provided if computation is being repeated
+      prims = self._get_fuse_prim(*args)
     for arg in args:
       l1,l0s = arg[:2]
-      V,vs = infos[l1]
       for ll in l0s:
         permutation.append(self._idxs.index(ll))
       neworder.append(l1)
-      newvs.append(V)
-      newshape.append(V.dim)
+      newvs.append(prims[l1].V)
+      newshape.append(prims[l1].dim)
     T = self._T.transpose(permutation).reshape(newshape)
-    return self._tensorfactory(T, tuple(neworder), tuple(newvs)), infos
+    return self._tensorfactory(T, tuple(neworder), tuple(newvs)), prims
 
   def unfuse(self, parsestr, *specs):
     """Unfuse indices according to parsestr
-    Must include specs from previous fusion
+    Must include specifications (fusion primitives) from previous fusion
     Substrings of the form L>l0,l1,l2|#.K (.K optional) separated by semicolons
       L is original index; l0,... are the new unfused indices
       (must have order of original)
@@ -893,16 +870,19 @@ class Tensor:
         if key:
           if key not in specs[argi]:
             raise KeyError('specification #%d missing key %d'%(argi,key))
-          info = specs[argi][key]
+          fusion = specs[argi][key]
         else:
-          info = specs[argi]
-        V0,vs0 = info[:2]
-        if not V0.cmp(self._dspace[l0], conj):
+          fusion = specs[argi]
+        if not isinstance(fusion, FusionPrimitive):
+          raise ValueError('specifications must be fusion primitives')
+        if conj:
+          fusion = fusion.conj()
+        if not (fusion.V == self._dspace[l0]):
           raise ValueError('Index %s does not match original'%l0)
-        if len(ls) != len(vs0):
+        if len(ls) != fusion.rank:
           raise ValueError('Index %s fused from %d indices, expanded into %d'%\
-            (l0,len(vs0),len(ls)))
-        argd[l0] = (ls, conj) + info[1:]
+            (l0,fusion.rank,len(ls)))
+        argd[l0] = (ls, fusion)
         if newidxs & set(ls):
           raise ValueError('New index %s repeated'%list(newidxs & set(ls))[0])
         newidxs.update(ls)
@@ -913,7 +893,7 @@ class Tensor:
         newidxs.add(ll)
         argd[l0] = ll
       else:
-        raise ValueError('Invalid substring %s'%sub)
+        raise ValueError('Invalid substring \'%s\''%sub)
       if l0 in oldidxs:
         raise ValueError('Index %s repeated'%l0)
       oldidxs.add(l0)
@@ -936,10 +916,10 @@ class Tensor:
     newidxs = []
     for ll in self._idxs:
       if isinstance(fuseinfo[ll],tuple):
-        names,conj,vs = fuseinfo[ll]
+        names,fusion = fuseinfo[ll]
+        vs = fusion._spaces_in
         newidxs.extend(names)
         newvs.extend(vs)
-        #d = functools.reduce(int.__mul__, (V.dim for V in vs))
         newshape.extend((V.dim for V in vs))
       else:
         newidxs.append(fuseinfo[ll])
@@ -1227,8 +1207,8 @@ class Tensor:
       print(copy(self.shape))
       print('%dx%d'%(M.shape[0],M.shape[1]))
       raise me
-    U = U._do_unfuse({0:(ls, False)+info[0][1:], 1:cl})
-    V = V._do_unfuse({0:cr, 1:(rs, False)+info[1][1:]})
+    U = U._do_unfuse({0:(ls, info[0]), 1:cl})
+    V = V._do_unfuse({0:cr, 1:(rs, info[1])})
     if sv_tensor:
       s = s.renamed({0:cl,1:cr})
     return U,s,V
@@ -1439,22 +1419,22 @@ class Tensor:
           raise ValueError('new center index for left-eigenvectors'
             ' %s invalid'%s)
         RV = self.__class__(v, (0,'c'), (A._spaces[0], links.VSpace(nn)))
-        RT = RV._do_unfuse({0:(lidx,False)+info[0][1:],'c':cr})
+        RT = RV._do_unfuse({0:(lidx,info[0]),'c':cr})
         if left:
           LV = RV._init_like(vl).conj()
-          LT = LV._do_unfuse({0:(ridx,False)+info[1][1:],'c':cl})
+          LT = LV._do_unfuse({0:(ridx,info[1]),'c':cl})
           return w, RT, LT
         return w, RT
       else:
         vs = []
         init_args = ((0,), (A._spaces[0],))
-        d_unfuse = {0:(lidx,False)+info[0][1:]}
+        d_unfuse = {0:(lidx,info[0])}
         for i in range(nn):
           vs.append(self.__class__(v[:,i], *init_args)._do_unfuse(d_unfuse))
         if left: 
           vls = []
           init_args = ((1,), (A._spaces[1]))
-          d_unfuse = {1:(lidx,False)+info[1][1:]}
+          d_unfuse = {1:(lidx,info[1][1:])}
           for i in range(nn):
             vl = vl.conj()
             vls.append(self.__class__(vl[:,i], *init_args)._do_unfuse(d_unfuse))
@@ -1596,6 +1576,94 @@ class Tensor:
           newspaces[it] = V0
         tref._spaces = tuple(newspaces)
 
+
+class FusionPrimitive:
+  """Object containing information about fusion operation"""
+  def __init__(self, vs_in, v_out=None, idx_in=None):
+    if isinstance(vs_in[0], links.VSpace):
+      self._spaces_in = tuple(vs_in)
+      self._idxs = idx_in
+    else:
+      assert isinstance(v_out, Tensor)
+      self._spaces_in = tuple(v_out._dspace[ll] for ll in vs_in)
+      self._idxs = tuple(vs_in)
+      v_out = idx_in
+    self._rank = len(vs_in)
+    if v_out is None:
+      if self._rank == 1:
+        v_out = self._spaces_in[0]
+      d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
+      v_out = links.VSpace(d)
+    self._out = v_out
+
+  _tensor_class = Tensor
+
+  @property
+  def rank(self):
+    return self._rank
+
+  @property
+  def dim(self):
+    return self._out.dim
+    
+  def conj(self):
+    return self.__class__([~v for v in self._spaces_in],~self._out,self._idxs)
+
+  @property
+  def V(self):
+    return self._out
+
+  @property
+  def tensorclass(self):
+    return self.__class__._tensor_class
+
+  def matchtensor(self, T, idx2=None, c=False):
+    """Compare with relevant indices of tensor T
+    idx2, if provided, gives the indices to be fused, in the relevant order
+    otherwise matches with self._idxs"""
+    if idx2 is None:
+      if self._idxs is None:
+        raise ValueError('Must provide index list if not set internally')
+      idx2 = self._idxs
+    for i in range(self._rank):
+      ll = idx2[i]
+      if ll not in T:
+        raise KeyError('Index %s provided does not belong to tensor'%ll)
+      if not self._spaces_in[i].cmp(T._dspace[ll],c):
+        raise ValueError('Index %s does not match fusion primitive'%ll)
+
+  def cmp(self, p2, idx1=None, idx2=None, c=False):
+    """Compare with indices of fusion primitive (given matching names)
+    idx1 and idx2, if provided, take the place of self._idxs, p2._idxs
+    Does not compare fused index"""
+    assert isinstance(p2, FusionPrimitive)
+    if self.rank != p2.rank:
+      return False
+    if idx1 is None:
+      idx1 = self._idxs
+    elif len(idx1) != self.rank:
+      raise ValueError('Number of provided does not match rank')
+    if idx2 is None:
+      idx2 = p2._idxs
+    elif len(idx2) != p2.rank:
+      raise ValueError('Number of provided does not match rank')
+    if idx1 is None or idx2 is None:
+      raise ValueError('Must provide index list if not set internally')
+    if set(idx1) != set(idx2):
+      return False
+    for i in range(self.rank):
+      i2 = idx2.index(idx1[i])
+      if not self._spaces_in[i].cmp(p2._spaces_in[i2],c):
+        return False
+    return True
+
+  def zeros_like(self,idxs=None):
+    """Create a zero tensor from the elements of the tensor as given"""
+    if idxs is None:
+      idxs = self._idxs
+    shape = tuple(v.dim for v in self._spaces_in)
+    return Tensor(np.zeros(shape,dtype=config.FIELD), idxs, self._spaces_in)
+ 
 
 class TensorTransposedView(Tensor):
   """View for tensor with indices renamed"""
