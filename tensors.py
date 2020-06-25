@@ -67,6 +67,20 @@ def _endomorphic(func):
   endo_wrap.__module__ = func.__module__
   return endo_wrap
 
+def _endo_transformation(func):
+  """Wrapper for functions that operate within a class of endomorphisms
+  Function in question should, for first argument M, replace M._T with
+  appropriate square matrix"""
+  def endo_wrap2(self, lidx, ridx, *args, **kw_args):
+    M, info = self._do_fuse((0,lidx),(1,ridx,0,True))
+    func(M, *args, **kw_args)
+    return M._do_unfuse({0:(lidx,info[0]), 1:(ridx,info[1])})
+
+  endo_wrap2.__doc__ = func.__doc__
+  endo_wrap2.__name__ = func.__name__
+  endo_wrap2.__module__ = func.__module__
+  return _endomorphic(endo_wrap2)
+
 class Tensor:
   def __init__(self, T, idxs, spaces):
     """Pass numpy.ndarray with index names & identifiers as sequence
@@ -185,6 +199,8 @@ class Tensor:
   def init_like(self, T, order):
     """Initialize tensor containing array T with index parameters of self,
     but permuted by order"""
+    if isinstance(order,str):
+      order = order.split(',')
     if set(self._idxs) != set(order):
       ll = list(set(self._idxs) ^ set(order))[0]
       if ll in self._idxs:
@@ -192,6 +208,8 @@ class Tensor:
       else:
         raise ValueError('Unrecognized index %s in order'%ll)
     idxo = tuple(order.index(ll) for ll in self._idxs)
+    if not isinstance(T,np.ndarray):
+      T = np.array(T)
     T = T.transpose(idxo)
     return self._tensorfactory(T, tuple(self._idxs), tuple(self._spaces))
 
@@ -375,7 +393,7 @@ class Tensor:
 
   def zeros_like(self):
     """Copy filled with zeros"""
-    return self._init_like(self._T.zeros_like())
+    return self._init_like(np.zeros_like(self._T))
 
   @classmethod
   def zeros_from(cls, parsestr, *tensors):
@@ -814,7 +832,8 @@ class Tensor:
 
   def _do_fuse(self, *args, prims=None):
     """Fuse based on list of tuples
-    (new idx, old idxs, info/reference to previous, conj. bool)"""
+    (new idx, old idxs, [info/reference to previous, conj. bool])
+    New index order will be explicitly as in args"""
     neworder = []
     newshape = []
     permutation = []
@@ -910,7 +929,7 @@ class Tensor:
 
   def _do_unfuse(self, fuseinfo):
     """Unfuse indices. fuseinfo is a complete dictionary of (current) indices
-    to single new idx name, or otherwise (idx names, conj, VSpaces)"""
+    to single new idx name, or otherwise (idx names, FusionPrimitive)"""
     newvs = []
     newshape = []
     newidxs = []
@@ -1470,6 +1489,23 @@ class Tensor:
       for i in range(1,n):
         M = M._do_contract(self, contracted, outl, outr, False)
       return M
+
+  @_endo_transformation
+  def exp(M, coeff):
+    M._T = linalg.expm(coeff*M._T)
+
+  @_endo_transformation
+  def log(M):
+    M._T = linalg.logm(M._T)
+
+  @_endo_transformation
+  def sqrt(M):
+    M._T = linalg.sqrtm(M._T)
+
+  @_endo_transformation
+  def inv(M):
+    M._T = linalg.inv(M._T)
+    
 
   @classmethod
   def identify_indices(cls, idxs, *tens):
