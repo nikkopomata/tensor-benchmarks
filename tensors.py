@@ -1616,13 +1616,14 @@ class Tensor:
 class FusionPrimitive:
   """Object containing information about fusion operation"""
   def __init__(self, vs_in, v_out=None, idx_in=None):
+    vs_in = tuple(vs_in)
     if isinstance(vs_in[0], links.VSpace):
-      self._spaces_in = tuple(vs_in)
+      self._spaces_in = vs_in
       self._idxs = idx_in
     else:
       assert isinstance(v_out, Tensor)
       self._spaces_in = tuple(v_out._dspace[ll] for ll in vs_in)
-      self._idxs = tuple(vs_in)
+      self._idxs = vs_in
       v_out = idx_in
     self._rank = len(vs_in)
     if v_out is None:
@@ -1693,12 +1694,19 @@ class FusionPrimitive:
         return False
     return True
 
-  def zeros_like(self,idxs=None):
+  def zeros_like(self, idxs=None):
     """Create a zero tensor from the elements of the tensor as given"""
     if idxs is None:
       idxs = self._idxs
     shape = tuple(v.dim for v in self._spaces_in)
     return Tensor(np.zeros(shape,dtype=config.FIELD), idxs, self._spaces_in)
+
+  def empty_like(self, idxs=None):
+    """Create an empty tensor from the elements of the tensor as given"""
+    if idxs is None:
+      idxs = self._idxs
+    shape = tuple(v.dim for v in self._spaces_in)
+    return Tensor(np.empty(shape,dtype=config.FIELD), idxs, self._spaces_in)
  
 
 class TensorTransposedView(Tensor):

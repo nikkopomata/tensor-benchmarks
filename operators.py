@@ -1,4 +1,5 @@
 import numpy as np
+import re
 from scipy import sparse,linalg
 import scipy.sparse.linalg
 from .tensors import Tensor,FusionPrimitive
@@ -217,13 +218,78 @@ class NetworkOperator(TensorOperator):
   """Abstract linear-operator wrapping for Network
   Provide original network, name of tensor representing the vector being acted
     on, optionally order of contraction for adjoint, boolean variable
-    determining whether or not to treat the operator as an endomorphism"""
+    determining whether or not to treat the operator as an endomorphism
+  Alternative:
+    (1) valid network constructor string, network constructor arguments, then
+      name of tensor representing vector acted upon
+    (2) network constructor string as above, but with name of tensor
+      representing vector in parentheses, no concrete vector provided"""
   
-  def __init__(self, net, t, adjoint_order=None, endomorphism=True):
-    self.network = copy(net)
+  def __init__(self, net, t, *args, adjoint_order=None, endomorphism=True):
+    if isinstance(net,str):
+      args = (t,)+args
+      # Network constructor argument
+      m = re.search(r'(?:^|;)\((\w+)\);', net)
+      if m:
+        # vector not explicitly provided
+        t = m.group(1)
+        net = re.sub(r'\((\w+)\)',r'\1',net)
+        # Find vector spaces as appropriate
+        didx = {}
+        # Partially parse string "net"
+        clauses = net.split(';')
+        # args represent tensors provided to network(), *minus* t0
+        if len(clauses) != len(args)+3:
+          # Autocompleted output
+          if len(clauses) != len(args)+2 or net[-1] != '~':
+            raise ValueError('Network creation string \'%s\' has incorrect '
+              'number of subclauses (expected %d, got %d)' \
+              %(net,len(args)+3,len(clauses)))
+          clauses[-1] = clauses[-1][:-1]
+          clauses.append('~')
+        tensors = {}
+        argidx = 0
+        for clause in clauses[:-2]:
+          if clause == t:
+            tidx = argidx
+            continue
+          ts = clause.split(',')
+          for t1 in ts:
+            if t1[-1] == '*':
+              tensors[t1[:-1]] = (args[argidx],True)
+            else:
+              tensors[t1] = (args[argidx],False)
+          argidx += 1
+        for t0,l0,t1,l1 in re.findall(r'(\w+)\.(\w+)-(\w+)\.(\w+)',clauses[-2]):
+          if t0 == t:
+            T,c = tensors[t1]
+            V = T._dspace[l1]
+            if c:
+              didx[l0] = V
+            else:
+              didx[l0] = ~V
+          elif t1 == t:
+            T,c = tensors[t0]
+            V = T._dspace[l0]
+            if c:
+              didx[l1] = V
+            else:
+              didx[l1] = ~V
+        self._fuse_in = FusionPrimitive(didx.values(),idx_in=tuple(didx.keys()))
+        T0 = self._fuse_in.empty_like()
+        targs = list(args)
+        targs.insert(tidx, T0)
+        self.network = networks.Network.network(net, *targs)
+      else:
+        t = args[-1]
+        self.network = networks.Network.network(net,*args[:-1])
+        T0 = self.network[t]
+        self._fuse_in = FusionPrimitive(T0._idxs,T0)
+    else:
+      self.network = copy(net)
+      T0 = self.network[t]
+      self._fuse_in = FusionPrimitive(T0._idxs,T0)
     self._t0 = t
-    T0 = self.network[t]
-    self._fuse_in = FusionPrimitive(T0._idxs,T0)
     try:
       idx = next(self.network.freeindices(unsetonly=True))
     except:
@@ -245,7 +311,7 @@ class NetworkOperator(TensorOperator):
         idxs.append(l)
         vs.append(self.network[t1]._dspace[ll])
       self._fuse_out = FusionPrimitive(vs, idx_in=idxs)
-      T1 = self._fuse_out.zeros_like()
+      T1 = self._fuse_out.empty_like()
     # Create network representing transposed action
     if endomorphism:
       T1 = T0
