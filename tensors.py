@@ -391,6 +391,9 @@ class Tensor:
     return self._init_like(self._T.copy())
     # __deepcopy__ using VSpace.__deepcopy__?
 
+  def copy(self):
+    return self.__copy__()
+
   def zeros_like(self):
     """Copy filled with zeros"""
     return self._init_like(np.zeros_like(self._T))

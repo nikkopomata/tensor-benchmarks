@@ -23,9 +23,11 @@ class Network:
   # _tchained is a chained combination of the two
   # _bonded maps from tensor name to all adjacent tensors
   # _out maps from (tensor, index) to index name in output tensor
+  # _cache determines whether or not a cached result is kept, and contains
+  #   said result if applicable
   # _tree assigns the contraction order
 
-  def __init__(self, tensors, tensordict, conjdict):
+  def __init__(self, tensors, tensordict, conjdict, cached=True):
     self._tlist = list(tensors)
     self._tdict = dict(tensordict)
     self._tset = [set() for t in tensors]
@@ -39,9 +41,10 @@ class Network:
     self._bonded = {t:set() for t in tensordict}
     self._out = {}
     self._tree = None
+    self._cache = cached
 
   @classmethod
-  def network(cls, parsestr, *tensors, compat=True):
+  def network(cls, parsestr, *tensors, compat=True, cached=False):
     """Initialize tensor network, with structure given by parsestr
       & list of tensors
     parsestr will be semicolon-separated list of comma-separated groups
@@ -79,7 +82,7 @@ class Network:
         tdict[t] = i
         tobjdict[t] = tensors[i]
         conj[t] = bool(c)
-    Net = cls(tensors, tdict, conj)
+    Net = cls(tensors, tdict, conj, cached=bool(cached))
     if len(substrs) > N:
       pstr = substrs[N]
       if not re.fullmatch(r'(?!,)((^|,)(\w+\.\w+-\w+\.\w+|\(\w+,\w+\)'
@@ -261,11 +264,17 @@ class Network:
   def expense(self):
     return self.contraction_expense(0)
 
+  def uncache(self):
+    """Delete cache, if applicable"""
+    if isinstance(self._cache, Tensor):
+      self._cache = True
+
   def updateto(self, t0, t1, c=False, rel=False):
     """Update tensor t0 by identifying as t1
     conjugation data may optionally be provided by argument c, or with * in t1
       rel is relative to t0; automatically relative to t1
     """
+    self.uncache()
     if not isinstance(t1,str):
       raise ValueError('t1 must identify tensor')
     if not re.fullmatch(r'\w+\*?', t1):
@@ -320,6 +329,7 @@ class Network:
     """Change tensor(s) indicated by t to T,
       optional conjugacy c (otherwise not conjugated)
       if rel, c is relative to current conjugation (False by default)"""
+    self.uncache()
     if not t in self._tdict:
       if re.fullmatch(r'(\w+\*?(,|$))+(?<!,)',t):
         ts = re.findall(r'(\w+)(\*)?',t)
@@ -352,6 +362,7 @@ class Network:
   def updateas(self, t0, T, c=False, rel=False):
     """Update tensor t0 by identifying as tensor T,
     adding if T is *not* already represented in self"""
+    self.uncache()
     if t0 not in self._tdict:
       raise KeyError('Tensor %s missing'%t0)
     if rel:
@@ -372,6 +383,7 @@ class Network:
       that points to that tensor
     if strict is True, compares exactly with vector spaces of current tensor;
       if False, only raise error if a conflict is caused"""
+    self.uncache()
     if not re.fullmatch(r'(?!,)((,|^)\w+\*?)*', parsestr):
       raise ValueError('Invalid tensor list \'%s\''%parsestr)
     ts = parsestr.split(',')
@@ -747,6 +759,8 @@ class Network:
       (also indicated by '#' at end of string setout)
     auto indicates that any index t.l not specified in setout retains name
       (also indicated by '~' at end of setout)"""
+    if not setout and isinstance(self._cache, Tensor):
+      return self._cache
     if isinstance(setout,str):
       if not re.fullmatch(r'(\w+\.\w+\>\w+(,|$))(\~|\#)?(?!<,)',setout):
         raise ValueError('Invalid argument \'%s\''%setout)
@@ -790,6 +804,8 @@ class Network:
     if len(set(idxmap.values())) < len(idxmap):
       raise ValueError('output index %s repeated'%_findrep1(idxmap))
     T._rename_dynamic(idxmap)
+    if self._cache:
+      self._cache = T
     return T
 
   def _tree_contract(self, branch):
@@ -1219,6 +1235,38 @@ class SubnetworkView(Network):
     net._set_bonds(bonds)
     net._set_output(self._tout)
     return net
+
+
+class Tensor_NetworkView(Tensor):
+  """View of a Network as the tensor resulting from its contraction"""
+
+  def __init__(self, net):
+    self.__net = net
+    self._dspace = {}
+    for t, ll in self.network.freeindices():
+      try:
+        l1 = net._out[t,ll]
+      except:
+        raise KeyError('Output index %s.%s not set'%(t,ll))
+      V = net._tlist[net._tdict[t]]._dspace[ll]
+      if net._conj[t]:
+        self._dspace[l1] = V.dual()
+      else:
+        self._dspace[l1] = V
+    self._spaces = tuple(self._dspace.values())
+    self._idxs = tuple(self._dspace.keys())
+    self.shape = dictproperty(self._Tensor__shape_get, None,
+      self._Tensor__shape_has, self._Tensor__shape_copy)
+
+  @property
+  def _T(self):
+    return self.__net.contract().permuted(self._idxs)
+
+  def __copy__(self):
+    if isinstance(self.__net._cache, Tensor):
+      return self.__net._cache.copy()
+    else:
+      return self.__net.contract()
 
 
 class NetworkTree:
