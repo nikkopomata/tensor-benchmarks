@@ -420,13 +420,14 @@ class Network:
         matchold = False
         matchnew = set()
         T = tensors[ii]
+        ti = idxold[ii]
         for l in T._idxs:
-          for t0 in self._tset[ii]:
+          for t0 in self._tset[ti]:
             if l in self._tbonds[t0]:
               t1,l1 = self._tbonds[t0][l]
               i1 = self._tdict[t1]
               if i1 in idxold:
-                if i1 < ii or (i1 == ii and l == l1 and conjs[ii]):
+                if i1 < ti or (i1 == ti and l == l1 and conjs[ii]):
                   # Will have already been checked
                   continue
                 c = self._conj[t0]^self._conj[t1]^conjs[idxold.index(i1)]
@@ -434,17 +435,18 @@ class Network:
               else:
                 matchold = True
           if matchold:
-            if not T._dspace[l].cmp(self._tlist[ii]._dspace[l], conjs[ii]):
-              raise ValueError('Index %s.%s changed improperly'%(ts[ii],l))
+            if not T._dspace[l].cmp(self._tlist[ti]._dspace[l], conjs[ii]):
+              raise ValueError('Index %s.%s changed improperly'%(ts[ti],l))
           for i1,l1,c in matchnew:
             if not T._dspace[l].cmp(tensors[i1]._dspace[l1], not c):
               raise ValueError('Bond %s.%s-%s.%s changed incompatibly' \
-                % (ts[ii],l,ts[i1],l1))
+                % (t0,l,t1,l1))
     for ii in range(nten):
       # Change the network
-      self._tlist[ii] = T
+      ti = idxold[ii]
+      self._tlist[ti] = T
       if conjs[ii]:
-        for t in self._tset[ii]:
+        for t in self._tset[ti]:
           self._conj[t] = not self._conj[t]
 
   def derive(self, parsestr, *tensorsadd):
@@ -670,7 +672,7 @@ class Network:
       raise ValueError('Output index name %s repeated'%_findrep1(net._out.values()))
     return net
 
-  def subnetwork(self, minus, out=None):
+  def subnetwork(self, minus, out=None, cached=False):
     """Returns subnetwork with tensors listed (iterable or comma-separated)
     removed
     May specify additional output index names by:
@@ -746,7 +748,7 @@ class Network:
             out[t,l] = l
     if len(set(out.values())) > len(out):
       raise ValueError('Output index name %s duplicated'%_findrep1(out))
-    net = SubnetworkView(self, sminus, out)
+    net = SubnetworkView(self, sminus, out, bool(cached))
     if self._tree is not None and not any(self.freeindices()):
       net._tree = self._tree.subnettree(sminus)
     return net
@@ -933,9 +935,16 @@ class Network:
         for t0 in scomp:
           rfree *= bonddim[t0]
         #print(np.log(contracted)/np.log(2),np.log(lfree)/np.log(2),np.log(rfree)/np.log(2))
-        if memcap and (contracted > memcap or lfree > memcap or rfree > memcap \
-            or lfree*contracted > memcap or rfree*contracted > memcap):
-          continue
+        if memcap:
+          if contracted > memcap:
+            continue
+          elif lfree*contracted > memcap:
+            if rfree*contracted <= memcap:
+              resdict[comp] = None
+            continue
+          elif rfree*contracted > memcap:
+            resdict[sub] = None
+            continue
         stepexp.append((sub,comp,lfree*rfree*contracted))
         resdict[comp] = None
         resdict[sub] = None
@@ -944,7 +953,7 @@ class Network:
       exp, tree = self.__optimize_child_simple(tenl,bonddim,resdict,expsort)
     except OptimizationOverflow:
       raise ValueError('Network optimization could not be found within memory'
-        ' limit %0.2fGiB'%(memcap/2**30))
+        ' limit %0.2fGiB'%(np.dtype(config.FIELD).itemsize*memcap/2**30))
     self.memexpense(tree,reorder=True)
     self._tree = tree
     
@@ -1141,7 +1150,7 @@ class SubnetworkView(Network):
   """View of a Network based on an existing network, representing a subnetwork
   thereof"""
 
-  def __init__(self, net, sminus, out):
+  def __init__(self, net, sminus, out, cached=False):
     """Create a view of net based on a subnetwork excluding sminus,
     given (additional) output names out"""
     self._parent = net
@@ -1168,6 +1177,7 @@ class SubnetworkView(Network):
     self._bonded = dictproperty(self.__bondedget,None,self._tensors,
       self.__bondedcopy)
     self._tset = dictproperty(self.__tsetget,None,self.__tidxs,self.__tsetcopy)
+    self._cache = cached
 
   # When necessary provide internal fields of Network
   def __istensor(self, key):

@@ -514,7 +514,7 @@ class Tensor:
     as identified by parsestr, of the form -
       semicolon-separated list (entries corresponding to tensors)
       for each tensor, comma separated list of indices
-      of the form left-right or old:left-right(&l2-r2&l3-r3...)
+      of the form left-right or oldleft:left-right(&l2-r2&l3-r3...)
       optionally some entries may be integers (dimensions) -
       l1-r1,l2-r2,..."""
     # Split into strings corresponding to tensors
@@ -573,6 +573,41 @@ class Tensor:
           raise ValueError('repeated index',idxs[i])
     assert r2 == len(idx1) and r2 == len(vs)
     return cls._identity(idx0,idx1,vs)
+
+  def id_extend(self, parsestr, *tensors):
+    """Extend self by multiplication with identity tensor based on indices
+      of self and/or additional tensors (as in id_from)
+    First clause of parsestr may optionally rename indices of self
+    May have an(other) optional initial clause that identifies identity
+      indices from self"""
+    clauses = parsestr.split(';')
+    if re.fullmatch(r'(\w+\>\w+\b,?)*\~?', clauses[0]):
+      clause = clauses.pop(0)
+      idxs = list(self._idxs)
+      idxrep = set()
+      for l0,l1 in re.findall(r'(\w+)\>(\w+)',clause):
+        try:
+          i0 = self._idxs.index(l0)
+        except ValueError:
+          raise KeyError('Index %s not found'%l0)
+        if i0 in idxrep:
+          raise ValueError('Index %s of original tensor repeated'%l0)
+        idxs[i0] = l1
+        idxrep.add(i0)
+      if '~' not in clause and len(idxrep) != len(idxs):
+        raise ValueError('Index %s not reassigned' \
+          % idxs[(set(range(len(idxs))) - idxrep).pop()])
+      if len(set(idxs)) != len(idxs):
+        raise ValueError('Index %s repeated'%_findrep1(idxs))
+      idxs = tuple(idxs)
+    else:
+      idxs = self._idxs
+    if len(clauses) == len(tensors)+1:
+      # Include self among tensors
+      tensors = (self,)+tensors
+    I = self.id_from(';'.join(clauses), *tensors)
+    return self.__class__(np.tensordot(self._T, I._T, 0),
+      idxs+I._idxs, self._spaces+I._spaces)
 
   def rand_like(self, **settings):
     """Copy with random tensor"""
@@ -994,7 +1029,7 @@ class Tensor:
       if not substrs[1] == '~' or \
           not re.fullmatch(r'(?!,)((,|^)\w+-\w+)*',substrs[0]):
         raise ValueError('Invalid argument %s'%parsestr)
-      auto1 = auto2 = True
+      auto1 = auto2 = ('','')
       contracted = re.findall(r'\b(\w+)-(\w+)\b',parsestr)
       out1 = {}
       out2 = {}
@@ -1002,12 +1037,23 @@ class Tensor:
       if not re.fullmatch(r'(?!,)((,|^)\w+-\w+)*',substrs[0]):
         raise ValueError('Invalid substring %s'%substrs[0])
       contracted = re.findall(r'\b(\w+)-(\w+)\b',substrs[0])
-      if not re.fullmatch(r'(\w+\>\w+(,(?=\w)|$|,?(?=\~)))*\~?',substrs[1]):
-        raise ValueError('Invalid substring %s'%substrs[1])
-      if not re.fullmatch(r'(\w+\>\w+(,(?=\w)|$|,?(?=\~)))*\~?',substrs[2]):
-        raise ValueError('Invalid substring %s'%substrs[2])
-      auto1 = (substrs[1] and substrs[1][-1] == '~')
-      auto2 = (substrs[2] and substrs[2][-1] == '~')
+      if not re.fullmatch(r'(?!,)((^|,)\w+\>\w+)*(\~|,\w*\~\w*)?',substrs[1]) \
+          and not re.fullmatch(r'\w*\~\w*',substrs[1]):
+        raise ValueError('Invalid substring \'%s\''%substrs[1])
+      if not re.fullmatch(r'(?!,)((^|,)\w+\>\w+)*(\~|,\w*\~\w*)?',substrs[2]) \
+          and not re.fullmatch(r'\w*\~\w*',substrs[1]):
+        raise ValueError('Invalid substring \'%s\''%substrs[2])
+      
+      m = re.search(r'(\w*)\~(\w*)',substrs[1])
+      if m:
+        auto1 = m.groups()
+      else:
+        auto1 = False
+      m = re.search(r'(\w*)\~(\w*)',substrs[2])
+      if m:
+        auto2 = m.groups()
+      else:
+        auto2 = False
       out1 = dict(re.findall(r'\b(\w+)\>(\w+)\b',substrs[1]))
       out2 = dict(re.findall(r'\b(\w+)\>(\w+)\b',substrs[2]))
     else:
@@ -1034,7 +1080,7 @@ class Tensor:
     if auto1:
       for ll in set(self._idxs) - idxs1:
         if ll not in out1:
-          out1[ll] = ll
+          out1[ll] = auto1[0]+ll+auto1[1]
     else:
       lx = set(self._idxs) - idxs1 - set(out1.keys())
       if lx:
@@ -1042,7 +1088,7 @@ class Tensor:
     if auto2:
       for ll in set(T2._idxs) - idxs2:
         if ll not in out2:
-          out2[ll] = ll
+          out2[ll] = auto2[0]+ll+auto2[1]
     else:
       lx = set(T2._idxs) - idxs2 - set(out2.keys())
       if lx:

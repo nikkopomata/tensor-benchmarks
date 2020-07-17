@@ -17,6 +17,8 @@ memcap = None
 memratio = 10
 # Whether output is to be flushed
 flush = True
+# Number of times to try linalg.svd before resorting to eigenvalue methods
+svd_retry = 1
 
 def restrict_memory(newmemcap):
   import resource
@@ -27,5 +29,5 @@ def restrict_memory(newmemcap):
   memcap = newmemcap
 
 # Verbosity levels
-linalg_verbose = 0 # Verbosity for linear-algebraic functions
+linalg_verbose = 1 # Verbosity for linear-algebraic functions
 lin_iter_verbose = 0 # Verbosity for iterative linear-algebraic functions
