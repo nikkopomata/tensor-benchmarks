@@ -4,21 +4,21 @@
 import os
 import os.path
 import re
-import pickle
 import time
 import functools
 from copy import copy,deepcopy
-from .npstack import np,rand,linalg,safesvd,sparse
+from .npstack import np,RNG,linalg,safesvd,sparse
 
 from . import links
 links._tensorimported = True
 from . import config
 
-def _np_rand(shape, gen=rand.randn):
+def _np_rand(shape, dist='normal'):
   """Get np.ndarray with appropriate features"""
-  T = gen(*shape).astype(config.FIELD)
-  if config.FIELD is complex:
-    T += 1j*gen(*shape)
+  T = getattr(RNG, dist)(size=shape).astype(config.FIELD)
+  if issubclass(config.FIELD,complex) or \
+      issubclass(config.FIELD,np.complexfloating):
+    T += 1j*getattr(RNG, dist)(size=shape)
   return T
 
 def _findrep1(ll):

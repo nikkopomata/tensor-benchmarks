@@ -3,7 +3,8 @@ import warnings
 
 if config.STACK == 0:
   import numpy as np
-  from numpy import random as rand
+  import numpy.random
+  RNG = numpy.random.default_rng()
   from scipy import linalg,sparse
 
 numsvd = 0
