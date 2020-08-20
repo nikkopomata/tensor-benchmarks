@@ -1525,7 +1525,7 @@ class Tensor:
     if n < 0:
       raise NotImplementedError()
     if n == 0:
-      return self.__class__.identity(lidx, ridx,  
+      return self.__class__._identity(lidx, ridx,  
         [self._dspace[l] for l in lidx])
     elif n == 1:
       return copy(self)
