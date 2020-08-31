@@ -4,7 +4,7 @@ import time
 import functools
 import itertools
 import collections
-from .npstack import np,rand,linalg,safesvd
+from .npstack import np,linalg,safesvd
 from .tensors import Tensor,_findrep1,dictproperty
 from copy import copy,deepcopy
 
