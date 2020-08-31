@@ -94,6 +94,15 @@ class Tensor:
       self.__shape_copy)
 
   @classmethod
+  def _vspace_from_arg(cls, A):
+    """General method to obtain a vector space from an argument, used in
+    various initialization procedures
+    Intended to be overridden in place of them"""
+    if not isinstance(A,int) or A <= 0:
+      raise ValueError('Argument must be tensor or (positive) dimension')
+    V = links.VSpace(A)
+
+  @classmethod
   def tensor(cls, t, idxs):
     """Initializer for tensors provided by the user
     Takes list or np.ndarray t, list (as list or comma-separated string) of
@@ -285,7 +294,7 @@ class Tensor:
           raise ValueError('Dimension provided for index %d.%s does not match'
             ' index %s'%(i0,l0,l1))
       else:
-        vs.append(links.VSpace(shape[i]))
+        vs.append(cls._vspace_from_arg(shape[i]))
         continue
       if m.group('conj'):
         vs.append(~V)
@@ -420,10 +429,8 @@ class Tensor:
       istrs = tensstr[i].split(',')
       A = tensors[i]
       if not isinstance(A,cls): # A is dimension of new space
-        if not isinstance(A,int) or A <= 0:
-          raise ValueError('Argument must be tensor or (positive) dimension')
-        V = links.VSpace(A)
-        dims.extend(len(istrs)*[A])
+        V = cls._vspace_from_arg(A)
+        dims.extend(len(istrs)*[V.dim])
         for s in istrs:
           m = re.fullmatch(r'(\w+)(\*)?',s)
           try:
@@ -471,7 +478,7 @@ class Tensor:
     vright = tuple(~v for v in spaces)
     N = functools.reduce(int.__mul__,dims)
     T = np.identity(N,dtype=config.FIELD).reshape(tuple(2*dims))
-    return cls(T, tuple(left+right), tuple(spaces)+vright)
+    return cls._tensorfactory(T, tuple(left+right), tuple(spaces)+vright)
 
   def id_like(self, parsestr):
     """Construct identity tensor within a copy of self
@@ -528,11 +535,9 @@ class Tensor:
       istrs = tensstr[i].split(',')
       A = tensors[i]
       if not isinstance(A,cls): # A is dimension of new space
-        if not isinstance(A,int) or A <= 0:
-          raise ValueError('Argument must be tensor or (positive) dimension')
         if not re.fullmatch(r'\w+-\w+(,\w+-\w+)*',tensstr[i]):
           raise ValueError('%s contains invalid index pairs'%tensstr[i])
-        V = links.VSpace(A)
+        V = cls._vspace_from_arg(A)
         for s in istrs:
           l,r = s.split('-')
           idx0.append(l)
@@ -606,7 +611,7 @@ class Tensor:
       # Include self among tensors
       tensors = (self,)+tensors
     I = self.id_from(';'.join(clauses), *tensors)
-    return self.__class__(np.tensordot(self._T, I._T, 0),
+    return self._tensorfactory(np.tensordot(self._T, I._T, 0),
       idxs+I._idxs, self._spaces+I._spaces)
 
   def rand_like(self, **settings):
@@ -918,8 +923,13 @@ class Tensor:
       if m:
         l0 = m.group(1)
         ls = m.group(2).split(',')
+        key = m.group('key')
+        conj = m.group('conj')
         if narg == 1:
           argi = 0
+          # May have mistaken key for index
+          if m.group(3) == '0' and isinstance(specs[argi],dict):
+            key = '0'
         else:
           argi = int(m.group(3))
         if argi >= narg:
@@ -1266,7 +1276,7 @@ class Tensor:
     if cl == cr and sv_tensor:
       raise ValueError('Center indices must be distinct if singular values'
         ' are reported as tensor')
-    M,info = self._do_fuse((0,ls),(1,rs))
+    M,info = self._svd_fuse(ls,rs)
     if discard:
       del self._T
     try:
@@ -1280,6 +1290,10 @@ class Tensor:
     if sv_tensor:
       s = s.renamed({0:cl,1:cr})
     return U,s,V
+
+  def _svd_fuse(self, left, right):
+    """Roughly, alias for _do_fuse - see invariant tensors for purpose"""
+    return self._do_fuse((0,left),(1,right))
 
   def _do_svd(self, chi, tolerance, chi_ratio, sv_tensor):
     """Helper function for svd; must provide rank-2 tensor indexed 0,1"""
@@ -1365,7 +1379,7 @@ class Tensor:
     T1 = np.multiply(Ttr,d)
     idx1 = self._idxs[:ii] + self._idxs[ii+1:] + (ll,)
     space1 = self._spaces[:ii] + self._spaces[ii+1:] + (self._spaces[ii],)
-    return self.__class__(T1, idx1, space1)
+    return self._tensorfactory(T1, idx1, space1)
 
   def mat_mult(self, ll, M):
     """Multiply a matrix along a single index"""
@@ -1398,7 +1412,7 @@ class Tensor:
     T1 = np.tensordot(self._T,M,(ii,0))
     idx1 = self._idxs[:ii] + self._idxs[ii+1:] + (ll,)
     space1 = self._spaces[:ii] + self._spaces[ii+1:] + (self._spaces[ii],)
-    return self.__class__(T1, idx1, space1)
+    return self._tensorfactory(T1, idx1, space1)
 
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,
@@ -1678,8 +1692,9 @@ class FusionPrimitive:
     if v_out is None:
       if self._rank == 1:
         v_out = self._spaces_in[0]
-      d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
-      v_out = links.VSpace(d)
+      else:
+        d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
+        v_out = links.VSpace(d)
     self._out = v_out
 
   _tensor_class = Tensor
@@ -1747,15 +1762,17 @@ class FusionPrimitive:
     """Create a zero tensor from the elements of the tensor as given"""
     if idxs is None:
       idxs = self._idxs
-    shape = tuple(v.dim for v in self._spaces_in)
-    return Tensor(np.zeros(shape,dtype=config.FIELD), idxs, self._spaces_in)
+    return Tensor(np.zeros(self.shape,dtype=config.FIELD),idxs,self._spaces_in)
 
   def empty_like(self, idxs=None):
     """Create an empty tensor from the elements of the tensor as given"""
     if idxs is None:
       idxs = self._idxs
-    shape = tuple(v.dim for v in self._spaces_in)
-    return Tensor(np.empty(shape,dtype=config.FIELD), idxs, self._spaces_in)
+    return Tensor(np.empty(self.shape,dtype=config.FIELD),idxs,self._spaces_in)
+
+  @property
+  def shape(self):
+    return tuple(v.dim for v in self._spaces_in)
  
 
 class TensorTransposedView(Tensor):
