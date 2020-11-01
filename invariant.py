@@ -18,7 +18,10 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
   def __init__(self, vs_in, v_out=None, idx_in=None, CG=None):
     FusionPrimitive.__init__(self, vs_in, v_out=v_out, idx_in=idx_in)
     if CG is not None:
+      if CG is 0:
+        CG = None
       self._CGmat = CG
+      return
     if self._rank == 1:
       if self._out.qsecond:
         # Must apply some charge-conjugation
@@ -154,10 +157,11 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
   
   def conj(self):
     if self._CGmat is None:
-      return FusionPrimitive.conj(self)
+      CGc = 0
     else:
-      return self.__class__([~v for v in self._spaces_in],
-        ~self._out,self._idxs,CG=self._CGmat.conj())
+      CGc = self._CGmat.conj()
+    return self.__class__([~v for v in self._spaces_in],
+      ~self._out,self._idxs,CG=CGc)
 
 
 class SubstantiatingFusion(InvariantFusion):

@@ -6,6 +6,7 @@ from .npstack import np,RNG,linalg,safesvd,sparse
 from abc import ABCMeta, abstractmethod
 import itertools
 import functools
+from copy import copy
 from . import tensors
 from . import links
 from . import config
@@ -263,7 +264,10 @@ class U1(Group):
     return
 
   def _firrep1d(self, r, theta):
-    return np.exp(1j*r*theta)
+    if r:
+      return np.exp(1j*r*theta)
+    else:
+      return 1
 
   def indicate(self, r):
     if r == 0:
@@ -504,10 +508,10 @@ class SU2(Group):
         dtype=REALTYPE))
       Wk *= np.tensordot(np.tensordot(arr1,arr2,0),arr3,0)
 
-      Wk *= np.sqrt(REALTYPE((s+1)*np.math.factorial(jsum) \
+      Wk *= np.sqrt((s+1)*np.math.factorial(jsum) \
              * np.math.factorial((s-smin+smax)//2) \
-             * np.math.factorial((s+smin-smax)//2)) \
-             / np.math.factorial((s+smin+smax)//2+1))
+             * np.math.factorial((s+smin-smax)//2) \
+             / REALTYPE(np.math.factorial((s+smin+smax)//2+1)))
       # Negative Sz
       if s != 0:
         Wk = np.concatenate((Wk, (-1)**jsum * Wk[::-1,::-1,(s-1)//2::-1]), 2)
@@ -741,27 +745,40 @@ class ProductGroup(Group):
     d2h = self.H.dim(r2h)
     d1 = d1g*d1h
     d2 = d2g*d2h
+    # 1st argument is product of quaternionic irreps?
+    # (must convert to real)
     q2r1 = (i1g == -1 and i1h == -1)
     if q2r1:
       U1 = self.quaternionic_to_real(r1g,r1h).conj()
+    # 2nd argument is product of quaternionic irreps?
     q2r2 = (i2g == -1 and i2h == -1)
     if q2r2:
       U2 = self.quaternionic_to_real(r2g,r2h).conj()
     fg,Wg = self.G.fusionCG(r1g, r2g)
+    Wg0 = copy(Wg)
     fh,Wh = self.H.fusionCG(r1h, r2h)
     for kg,ng in fg:
-      Wkg = Wg[kg]
       ikg = self.G.indicate(kg)
+      assert ikg in [-1,0,1]
       for kh,nh in fh:
+        # Must retrieve Wkg every time because it may be replaced during
+        # loop iteration
+        Wkg = Wg[kg]
         Wkh = Wh[kh]
         ikh = self.H.indicate(kh)
+        assert ikh in [-1,0,1]
+        # Fusion is product of quaternionic irreps?
         q2r = (ikg == -1 and ikh == -1)
         if q2r:
           U = self.quaternionic_to_real(kg,kh).T
         if ikg == -1 and ikh == 0 and not self.H.complex_pairorder(kh):
+          # Quaternionic x complex -
+          # incorrect pairing, must switch quaternionic label
           qcflip = 1
-          k = self._join__rep(self.G.dual(kg),kh)
+          k = self._join_rep(self.G.dual(kg),kh)
         elif ikg == 0 and ikh == -1 and not self.G.complex_pairorder(kg):
+          # Complex x quaternionic -
+          # incorrect pairing, must switch quaternionic label
           qcflip = 2
           k = self._join_rep(kg, self.H.dual(kh))
         else:
@@ -821,7 +838,7 @@ class ProductGroup(Group):
   def complex_pairorder(self, r):
     # Return ordering for first complex irrep encountered
     rg,rh = self._split_rep(r)
-    if self.indicate(rg) == 0:
+    if self.G.indicate(rg) == 0:
       return self.G.complex_pairorder(rg)
     else:
       return self.H.complex_pairorder(rh)

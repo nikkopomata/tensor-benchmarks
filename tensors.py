@@ -100,7 +100,7 @@ class Tensor:
     Intended to be overridden in place of them"""
     if not isinstance(A,int) or A <= 0:
       raise ValueError('Argument must be tensor or (positive) dimension')
-    V = links.VSpace(A)
+    return links.VSpace(A)
 
   @classmethod
   def tensor(cls, t, idxs):
@@ -290,6 +290,8 @@ class Tensor:
           if l0 not in T0._dspace:
             raise ValueError('Tensor provided does not contain index %s'%l0)
           V = T0._dspace[l0]
+        else:
+          raise ValueError('expected dict or Tensor, got %s'%str(type(T0)))
         if V.dim != shape[i]:
           raise ValueError('Dimension provided for index %d.%s does not match'
             ' index %s'%(i0,l0,l1))
@@ -478,7 +480,7 @@ class Tensor:
     vright = tuple(~v for v in spaces)
     N = functools.reduce(int.__mul__,dims)
     T = np.identity(N,dtype=config.FIELD).reshape(tuple(2*dims))
-    return cls._tensorfactory(T, tuple(left+right), tuple(spaces)+vright)
+    return cls(T, tuple(left+right), tuple(spaces)+vright)
 
   def id_like(self, parsestr):
     """Construct identity tensor within a copy of self
