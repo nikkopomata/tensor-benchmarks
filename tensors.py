@@ -1483,6 +1483,7 @@ class Tensor:
         if selection:
           idxw = np.argsort(-np.abs(w))
           # Sort eigenvalues, eigenvectors
+          # NOTE: can np.delete be used for this?
           Msort = sparse.csc_matrix((nn*[1],idxw[selection[0]:selection[1]+1],
             range(nn+1)),dtype=int,shape=(N,nn))
           w = Msort.__rmul__(w)
@@ -1844,7 +1845,12 @@ class dictproperty:
     raise AttributeError('Descriptor cannot be replaced')
 
   def __copy__(self):
-    return self.fcopy(*self.argx)
+    if self.fcopy is None:
+      has = self.__keys if self.fhas is None else self.fhas 
+      return self.__class__(self.fgetitem,self.fsetitem,
+        has,self.fget,*self.argx)
+    else:
+      return self.fcopy(*self.argx)
 
   def __deepcopy__(self):
     cpy = self.__copy__()

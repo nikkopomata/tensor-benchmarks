@@ -407,7 +407,7 @@ class Network:
       if idx in idxold:
         ifirst = idxold.index(idx)
         raise ValueError('Tensor identified by %s already referenced as %s' \
-          (t0, ts[ifirst]))
+          % (t0, ts[ifirst]))
       idxold.append(idx)
       conj ^= self._conj[t0]
       if strict:
@@ -439,6 +439,8 @@ class Network:
               raise ValueError('Index %s.%s changed improperly'%(ts[ti],l))
           for i1,l1,c in matchnew:
             if not T._dspace[l].cmp(tensors[i1]._dspace[l1], not c):
+              # Retrieve t1
+              t1 = self._tbonds[t0][l][0]
               raise ValueError('Bond %s.%s-%s.%s changed incompatibly' \
                 % (t0,l,t1,l1))
     for ii in range(nten):
