@@ -171,30 +171,36 @@ class SquarePartitionFunction(PartitionFunction):
 
 # NOTE: make subclass of RG ABC? 
 class HOTRGsquarevert:
-  def __init__(self, base, chi, xselect=None, yselect=None):
+  def __init__(self, base, chi, yselect=None):
     """Optionally select which elements of the unit cell to coarsegrain
-    (if (x,y) in xselect x yselect, will coarse-grain (x,y)-(x,y+1))"""
-    if xselect is None:
-      xselect = tuple(range(base.Nx))
-      mx = 1
-    else:
-      assert all(isinstance(x,int) and x >= 0 for x in xselect)
-      xselect = tuple(sorted(xselect))
-      mx = max(xselect)//base.Nx+1
+    (if y in yselect, will coarse-grain (x,y)-(x,y+1))"""
     if yselect is None:
       yselect = tuple(range(0,base.Ny,2))
       my = base.Ny%2+1
     else:
-      assert all(isinstance(y,int) and y >= 0 for y in yselect)
+      assert all(isinstance(y,int) and y >= 0 and (y+1 not in yselect) \
+        for y in yselect)
       yselect = tuple(sorted(yselect))
       my = (max(yselect)+1)//base.Ny+1
     self._base = base
     self._chi = chi
-    self._multiplicity = (mx,my)
-    self._xselect = xselect
+    self._multiplicity = (1,my)
     self._yselect = yselect
     self._next = None
-    self.wL = {}
+    self._wL = {}
+    self._norm_original = {}
+    self._Nx = self._base.Nx
+
+  def wL(self, x, y):
+    return self._wL[x%self._Nx,y%(self._base.Ny*self._multiplicity[1])
+
+  def getnorm(self, x, y):
+    xy = [x%self._Nx,y%self._base.Ny]
+    if xy not in self._norm_original:
+      nnet = networks.network('B;T;T.b-B.t',self._base[x,y],self._base[x+1,y])
+      nnet = nnet.derive('|~|,c')
+      self._norm_original[xy] = nnet.contract()
+    return self._norm_original[xy]
 
   def initializeHOSVD(self):
     """Initialize using original (HOSVD) method"""
@@ -206,7 +212,7 @@ class HOTRGsquarevert:
     Rnet = Lnet.derive('|T.r,B.r,T.t,B.b|l,r>~')
     # Row-by-row
     for y in self._yselect:
-      for x in self._xselect:
+      for x in range(self._Nx):
         Lnet.replaceall('B,T',self._base[x,y],self._base[x,y+1])
         Rnet.replaceall('B,T',self._base[x+1,y],self._base[x+1,y+1])
         ML = Lnet.contract()
@@ -218,9 +224,9 @@ class HOTRGsquarevert:
         epsL = nL**2-sum(wL)
         epsR = nR**2-sum(wR)
         if epsL>epsR:
-          self.wL[x,y] = UR.renamed('tr-t,br-b')
+          self._wL[x,y] = UR.renamed('tr-t,br-b,c-r')
         else:
-          self.wL[x,y] = UL.renamed('tl-t,bl-b')
+          self._wL[x,y] = UL.renamed('tl-t,bl-b,c-r')
 
   def initializemixed(self):
     """Initialize with sum of environment tensors"""
@@ -232,20 +238,114 @@ class HOTRGsquarevert:
     Rnet = Lnet.derive('|T.r,B.r,T.t,B.b|l,r>~')
     # Row-by-row
     for y in self._yselect:
-      for x in self._xselect:
+      for x in range(self._Nx):
         Lnet.replaceall('B,T',self._base[x,y],self._base[x,y+1])
         Rnet.replaceall('B,T',self._base[x+1,y],self._base[x+1,y+1])
         ML = Lnet.contract()
         MR = Rnet.contract()
         M = ML/ML.norm() + MR/MR.norm()
-        w,U = ML.eig('tr-tl,br-bl',selection=-self.chi,mat=True)
-        self.wL[x,y] = 
-        wR,UR = MR.eig('tl-tr,bl-br',selection=-self.chi,mat=True)
+        wL,UL = ML.eig('tr-tl,br-bl',selection=-self.chi,mat='r')
+        wR,UR = MR.eig('tl-tr,bl-br',selection=-self.chi,mat='r')
         epsL = nL**2-sum(wL)
         epsR = nR**2-sum(wR)
         if epsL>epsR:
-          self.wL[x,y] = UR.renamed('tr-t,br-b')
+          self._wL[x,y] = UR.renamed('tr-t,br-b')
         else:
-          self.wL[x,y] = UL.renamed('tl-t,bl-b')
+          self._wL[x,y] = UL.renamed('tl-t,bl-b')
 
-  def optimizelin(self, delta, niter):
+  def optimize_tensor(self, delta, niter, linear=False, verbose=True):
+    """Optimize norm-squared of resulting tensor(s)
+    delta is termination criterion, niter is max number of iterations
+    linear gives whether to optimize linearly (projective update)
+    or quadratically (projective truncation); may provide instead
+    switch-over values of delta, niter, or (delta,niter)
+    Returns (max) stopping (delta, niter)"""
+    if not linear:
+      return self._optimize_tensor_quad(self, delta, niter, verbose)
+    elif isinstance(linear,float):
+      self._optimize_tensor_quad(linear, niter, verbose)
+      linear = True
+    elif isinstance(linear,tuple):
+      self._optimize_tensor_quad(*linear, verbose=verbose)
+    elif isinstance(linear,int) and linear>1:
+      self._optimize_tensor_quad(delta, linear, verbose)
+    # Sweep rows individually
+    dmax = 0
+    nmax = 0
+    for y in self._yselect:
+      nets = self._Nx*[None]
+      envs = {}
+      chis = np.zeros(self._Nx)
+      norms = []
+      # Initialize networks
+      for x in range(self._Nx):
+        nets[x] = networks.network('B;T;wL;wR*;T.b-B.t;T.l-wL.t,T.r-wR.t,' \
+          'B.l-wL.b,B.r-wR.b',self._base[x,y],self._base[x,y+1],
+          self.wL(x,y),self.wL(x+1,y)).derive('|~|,c')
+        envs[x,'l'] = nets[x].subnetwork('wLc',out=env)
+        envs[(x-1)%self._Nx,'r'] = nets[x].subnetwork('wR',out=env)
+        chis[x] = self._wL[x,y].shape['l']
+        norms.append(self.getnorm(x,y))
+      norms.append(norms[0])
+      overlaps = chis.copy()
+      diff = sum(overlaps)/self._Nx
+      n = 0
+      while diff > delta:
+        overlap0 = overlaps.copy()
+        for x in range(self._Nx):
+          env = envs[x,'l'].contract()/norms[x] +\
+                envs[x,'r'].contract()/norms[x+1]
+          u,s,v = env.svd('t,b|c|l',chi=self.chi)
+          w1 = u.contract(v,'c-c;~')
+          overlaps[x] = abs(w1.contract(self._wL[x,y],'t-t,b-b;l>l;l>r*'))**2
+          self._wL[x,y] = w1
+          nets[x].replaceall('wL',w1)
+          nets[x-1].replaceall('wR',w1)
+        diff = sum(np.abs(overlaps))/self._Nx
+        if verbose:
+          print('%d-%d [%d] %0.6g'%(y,y+1, n,diff))
+        n += 1
+      dmax = max(diff,dmax)
+      nmax = max(n,nmax)
+    return dmax,nmax
+
+  def _optimize_tensor_quad(self, delta, niter, verbose=True):
+    # Sweep rows individually
+    dmax = 0
+    nmax = 0
+    for y in self._yselect:
+      nets = self._Nx*[None]
+      envs = {}
+      chis = np.zeros(self._Nx)
+      norms = []
+      # Initialize networks
+      for x in range(self._Nx):
+        nets[x] = networks.network('B;T;wL;wR*;T.b-B.t;T.l-wL.t,T.r-wR.t,' \
+          'B.l-wL.b,B.r-wR.b',self._base[x,y],self._base[x,y+1],
+          self.wL(x,y),self.wL(x+1,y)).derive('|~|,c')
+        envs[x,'l'] = nets[x].subnetwork('wLc',out=env)
+        envs[(x-1)%self._Nx,'r'] = nets[x].subnetwork('wR',out=env)
+        chis[x] = self._wL[x,y].shape['l']
+        norms.append(self.getnorm(x,y))
+      norms.append(norms[0])
+      overlaps = chis.copy()
+      diff = sum(overlaps)/self._Nx
+      n = 0
+      while diff > delta:
+        overlap0 = overlaps.copy()
+        for x in range(self._Nx):
+          env = envs[x,'l'].contract()/norms[x] +\
+                envs[x,'r'].contract()/norms[x+1]
+          u,s,v = env.svd('t,b|c|l',chi=self.chi)
+          w1 = u.contract(v,'c-c;~')
+          overlaps[x] = abs(w1.contract(self._wL[x,y],'t-t,b-b;l>l;l>r*'))**2
+          self._wL[x,y] = w1
+          nets[x].replaceall('wL',w1)
+          nets[x-1].replaceall('wR',w1)
+        diff = sum(np.abs(overlaps))/self._Nx
+        if verbose:
+          print('%d-%d [%d] %0.6g'%(y,y+1, n,diff))
+        n += 1
+      dmax = max(diff,dmax)
+      nmax = max(n,nmax)
+    return dmax,nmax

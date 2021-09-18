@@ -461,36 +461,50 @@ class ScaledOperator(TensorOperator):
 
 
 class SumOperator(TensorOperator):
-  def __init__(self, base1, base2):
+  def __init__(self, base1, base2, *additional_bases):
     if not base1._fuse_in.cmp(base2._fuse_in) or \
         not base1._fuse_out.cmp(base2._fuse_out):
       raise ValueError('Operators are not summable')
-    self._base_op1 = base1
-    self._base_op2 = base2
     self._fuse_in = base1._fuse_in
     self._fuse_out = base1._fuse_out
+    # Needs to not recurse excessively
+    if isinstance(base1,SumOperator):
+      bo1 = base1._base_ops
+    else:
+      bo1 = (base1,)
+    if isinstance(base2,SumOperator):
+      bo2 = base2._base_ops
+    else:
+      bo2 = (base2,)
+    self._base_ops = bo1+bo2
+    for base in additional_bases:
+      if not base1._fuse_in.cmp(base._fuse_in) or \
+          not base1._fuse_out.cmp(base._fuse_out):
+        raise ValueError('Operators are not summable')
+      bo2 += (base,)
 
   def tensor_action(self, T):
-    return self._base_op1.tensor_action(T) + self._base_op2.tensor_action(T)
+    action = self._base_ops[0].tensor_action(T)
+    for op in self._base_ops[1:]:
+      action += op.tensor_action(T)
+    return action
   
   def adjoint_tensor_action(self, T):
-    return self._base_op1.adjoint_tensor_action(T) + \
-      self._base_op2.adjoint_tensor_action(T)
+    action = self._base_ops[0].adjoint_tensor_action(T)
+    for op in self._base_ops[1:]:
+      action += op.adjoint_tensor_action(T)
 
   def scalar_times(self, factor):
-    return SumOperator(self._base_op1.scalar_times(factor),
-        self._base_op2.scalar_times(factor))
+    return SumOperator(*(op.scalar_times(factor) for op in self._base_ops))
 
   def transpose(self):
-    return SumOperator(self._base_op1.transpose(),
-        self._base_op2.transpose())
+    return SumOperator(*(op.transpose() for op in self._base_ops))
 
   def adjoint(self):
-    return SumOperator(self._base_op1.adjoint(),
-        self._base_op2.adjoint())
+    return SumOperator(*(op.adjoint() for op in self._base_ops))
 
   def conj(self):
-    return SumOperator(self._base_op1.conj(), self._base_op2.conj())
+    return SumOperator(*(op.conj() for op in self._base_ops))
 
 
 class ProductOperator(TensorOperator):
