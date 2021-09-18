@@ -78,7 +78,7 @@ class Network:
           raise ValueError('Invalid tensor-identification substring %s'%ss)
         t,c = m.groups()
         if t in tdict:
-          raise ValueError('Tensor %s repeated'%ll)
+          raise ValueError('Tensor %s repeated'%t)
         tdict[t] = i
         tobjdict[t] = tensors[i]
         conj[t] = bool(c)
@@ -335,8 +335,12 @@ class Network:
         ts = re.findall(r'(\w+)(\*)?',t)
         t0,c00 = ts[0]
         c0 = bool(c00)
+        # Previously failed to catch nonexistent index
+        if t0 not in self._tdict:
+          raise KeyError(f'index {t0} referenced not found in network')
         self.replace(t0, T, c^c0, rel)
         for t1,c1 in ts[1:]:
+          raise KeyError(f'index {t1} referenced not found in network')
           try:
             self.updateto(t1,t0,c=c^c0^bool(c1),rel=rel)
           except:
