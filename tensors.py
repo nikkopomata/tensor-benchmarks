@@ -228,7 +228,8 @@ class Tensor:
     Comma-separated list of indices, with identification either to
       previously-named index K, as in idx:K (or idx:K* for dual)
     or to index of argument, |#.K (optionally |# if the argument identifies a
-      single vector space or |K if exactly one tensor is provided as argument"""
+      single vector space or |K if exactly one tensor is provided as argument)
+      # indexed from zero"""
     T = np.array(T,dtype=config.FIELD)
     idxs = []
     clauses = parsestr.split(',')
@@ -849,7 +850,8 @@ class Tensor:
       for ll in set(self._idxs) - idxall:
         if ll in newidxs:
           raise ValueError('Autofilled index \'%s\' already assigned'%ll)
-        args.append((ll,(ll,)))
+        # Special form used to enforce preservation
+        args.append((ll,))
     fused,info = self._do_fuse(*args)
     if 'incl_info' in settings and not settings['incl_info']:
       return fused
@@ -862,7 +864,9 @@ class Tensor:
       if len(arg) == 2:
         l1,l0s = arg
         infos[l1] = FusionPrimitive(l0s,self)
-      else:
+      elif len(arg) == 1:
+        l1, = arg
+        infos[l1] = FusionPrimitive((l1,),self)
         assert len(arg) == 4
         l1,l0s,fusion,conj = arg
         if not isinstance(fusion,FusionPrimitive):
@@ -886,9 +890,13 @@ class Tensor:
     if prims is None: # Provided if computation is being repeated
       prims = self._get_fuse_prim(*args)
     for arg in args:
-      l1,l0s = arg[:2]
-      for ll in l0s:
-        permutation.append(self._idxs.index(ll))
+      if len(arg) == 1:
+        l1, = arg
+        permutation.append(self._idxs.index(l1))
+      else:
+        l1,l0s = arg[:2]
+        for ll in l0s:
+          permutation.append(self._idxs.index(ll))
       neworder.append(l1)
       newvs.append(prims[l1].V)
       newshape.append(prims[l1].dim)

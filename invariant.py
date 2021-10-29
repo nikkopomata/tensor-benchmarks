@@ -255,6 +255,9 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       if len(arg) == 2:
         l1,l0s = arg
         infos[l1] = self.group.Fusion(l0s,self)
+      elif len(arg) == 1:
+        l1, = arg
+        infos[l1] = self.group.Fusion((l1,),self,CG=0)
       else:
         assert len(arg) == 4
         l1,l0s,fusion,conj = arg
@@ -276,9 +279,13 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
     if prims is None: # Provided if computation is being repeated
       prims = self._get_fuse_prim(*args)
     for arg in args:
-      l1,l0s = arg[:2]
-      for ll in l0s:
-        permutation.append(self._idxs.index(ll))
+      if len(arg) == 1:
+        l1, = arg
+        permutation.append(self._idxs.index(l1))
+      else:
+        l1,l0s = arg[:2]
+        for ll in l0s:
+          permutation.append(self._idxs.index(ll))
       neworder.append(l1)
       newvs.append(prims[l1].V)
       newshape.append(prims[l1].dim)

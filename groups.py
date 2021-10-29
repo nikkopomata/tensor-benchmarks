@@ -17,6 +17,36 @@ pi = REALTYPE('3.1415926535897932384626433832795029')
 sqrthalf = np.sqrt(REALTYPE(.5))
 # Not all functions used are compatible with higher-precision - use mpmath?
 
+# Matrix exponential accurate for high precision
+n_expm128 = 10
+eps_128 = 1e-30
+theta_n_expm128 = (eps_128*np.math.factorial(n_expm128))**(1/n_expm128)
+# Try to make matrix of order 1, to avoid squaring error
+n_expm128 = 21
+theta_n_expm128 = 1
+def expm_128(M):
+  """Matrix exponential for float128 and complex256"""
+  real = (M.dtype == REALTYPE)
+  assert real or (M.dtype == CPLXTYPE)
+  # Scaling part
+  s = max(0,int(np.ceil(np.log(linalg.norm(M)/theta_n_expm128)/np.log(2))))
+  A = M/2**s
+  # Taylor expansion part: Start with power 0
+  expA = np.identity(M.shape[0],dtype=(REALTYPE if real else CPLXTYPE))
+  Ai = A
+  for n in range(1,n_expm128):
+    expA += Ai
+    Ai = Ai.dot(A)/(n+1)
+  expA += Ai
+  # Squaring part
+  for i in range(s):
+    expA = expA.dot(expA)
+  return expA
+
+def retrieve(label):
+  """Obtain already-initialized group from label"""
+  return GroupType._registry[label]
+
 class GroupType(ABCMeta):
   _registry = {}
 
@@ -449,7 +479,7 @@ class SU2(Group):
       return 1
 
   def _firrep(self, r, g):
-    return linalg.expm(self.spinmats(r).dot(g))
+    return expm_128(self.spinmats(r).dot(g))
 
   def _firrep1d(self, r, g):
     return 1
