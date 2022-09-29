@@ -274,6 +274,9 @@ class Tensor:
               vs.append(~V)
             else:
               vs.append(V)
+            if V.dim != shape[i]:
+              raise ValueError(f'Dimension of space provided as argument {l0}'
+                f'does not match index {l0} (dimension {i})')
             continue
           else:
             raise ValueError('Index %s improperly referenced'%l0)

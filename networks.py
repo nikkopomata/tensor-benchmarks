@@ -395,8 +395,8 @@ class Network:
     if len(ts) != nten:
       raise ValueError('%d tensors provided versus %d substrings' \
         % (len(ts),nten))
-    idxold = []
-    conjs = []
+    idxold = [] # Index in original list
+    conjs = [] # Conjugation relative to said list
     for ii in range(nten):
       T = tensors[ii]
       if ts[ii][-1] == '*':
@@ -417,15 +417,32 @@ class Network:
       if strict:
         # Just check against existing tensor
         self._tlist[idx].matches(T, conj)
+      else:
+        # Start by checking that all previously-contracted indices are still
+        # there
+        contracted = set()
+        for t1 in self._tset[idx]:
+          contracted |= self._tbonds[t1].keys()
+        if contracted - T.idxset:
+          for t1 in self._tset[idx]:
+            ls = set(self._tbonds[t1].keys()) - T.idxset
+            if ls:
+              l0 = ls.pop()
+              tb,lb = self._tbonds[t1][l0]
+              raise KeyError(f'Tensor, identified as {t0}, lacking index '
+                f'{t1}.{l0} contracted with {tb}.{lb}')
+          assert False
       conjs.append(conj)
     if not strict:
       # Test bonds individually
       for ii in range(nten):
-        matchold = False
-        matchnew = set()
         T = tensors[ii]
         ti = idxold[ii]
         for l in T._idxs:
+          matchold = False # Contracts with unchanged tensor so must be
+                           # compatible with self
+          matchnew = set() # (new idx, contracted index name, conjugation)
+                           # for indices contracted with tensors being changed
           for t0 in self._tset[ti]:
             if l in self._tbonds[t0]:
               t1,l1 = self._tbonds[t0][l]
@@ -435,14 +452,15 @@ class Network:
                   # Will have already been checked
                   continue
                 c = self._conj[t0]^self._conj[t1]^conjs[idxold.index(i1)]
-                matchnew.add((i1, t1, c))
+                matchnew.add((i1, l1, c))
               else:
                 matchold = True
           if matchold:
             if not T._dspace[l].cmp(self._tlist[ti]._dspace[l], conjs[ii]):
               raise ValueError('Index %s.%s changed improperly'%(ts[ti],l))
           for i1,l1,c in matchnew:
-            if not T._dspace[l].cmp(tensors[i1]._dspace[l1], not c):
+            tinew = idxold.index(i1)
+            if not T._dspace[l].cmp(tensors[tinew]._dspace[l1], not c):
               # Retrieve t1
               t1 = self._tbonds[t0][l][0]
               raise ValueError('Bond %s.%s-%s.%s changed incompatibly' \
@@ -450,7 +468,7 @@ class Network:
     for ii in range(nten):
       # Change the network
       ti = idxold[ii]
-      self._tlist[ti] = T
+      self._tlist[ti] = tensors[ii]
       if conjs[ii]:
         for t in self._tset[ti]:
           self._conj[t] = not self._conj[t]
@@ -783,7 +801,7 @@ class Network:
     assert leaves == self._tdict.keys()
     if c:
       T = T.conj()
-    if isinstance(T,config.FIELD):
+    if not isinstance(T,Tensor):
       return T
     idxmap = {}
     if setout:
