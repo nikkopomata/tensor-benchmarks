@@ -60,25 +60,19 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
 
   def tensor_in(self, v):
     """Convert input vector to Tensor"""
-    if len(v.shape) == 2:
-      v = v.flatten()
-    T0 = self._fuse_in.tensorclass(v, (0,), (self.Vin,))
-    return T0._do_unfuse({0:(self.idx_in,self._fuse_in)})
+    return self._fuse_in.tensor_convert(v)
 
   def vector_out(self, T):
     """Convert output Tensor to vector"""
-    return T._do_fuse((0,self.idx_out),prims={0:self._fuse_out})[0]._T
+    return self._fuse_out.vector_convert(T)
 
   def tensor_adjoint_in(self, v):
     """Convert input vector to Tensor"""
-    if len(v.shape) == 2:
-      v = v.flatten()
-    T0 = self._fuse_out.tensorclass(v, (0,), (self.Vout,))
-    return T0._do_unfuse({0:(self.idx_out,self._fuse_out)})
+    return self._fuse_out.tensor_convert(v)
 
   def vector_adjoint_out(self, T):
     """Convert output Tensor to vector"""
-    return T._do_fuse((0,self.idx_in),prims={0:self._fuse_in})[0]._T
+    return self._fuse_in.vector_convert(T)
 
   @property
   def dtype(self):
@@ -86,7 +80,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
 
   @property
   def shape(self):
-    return (self.Vout.dim, self.Vin.dim)
+    return (self._fuse_out.effective_dim,self._fuse_in.effective_dim)
 
   def scalar_times(self, factor):
     return ScaledOperator(self, factor)
@@ -181,7 +175,8 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
   def H(self):
     return self.adjoint()
 
-  def eigs(self, k, herm=True, vecs=True, nv=None, guess=None, **eigs_kw):
+  def eigs(self, k, herm=True, vecs=True, nv=None, guess=None, mat=False,
+      **eigs_kw):
     """Eigendecomposition of linear transformation obtained from network,
     using ARPACK methods
     k is the number of eigenvalues to collect
@@ -193,6 +188,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     if not self.is_endomorphic:
       raise ValueError('Can only find eigenvalues of endomorphism')
     if isinstance(guess, Tensor):
+      self._fuse_in.matchtensor(guess)
       guess = self.vector_out(guess)
     elif guess:
       raise TypeError('guess, if provided, must be Tensor')
@@ -207,11 +203,37 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       return rv
     w, vs = rv
     nn = len(w)
-    Ts = []
-    for i in range(nn):
-      v = vs[:,i]
-      Ts.append(self.tensor_in(v/linalg.norm(v)))
-    return w, Ts
+    if mat:
+      T = self._fuse_out.tensor_convert_multiaxis(vs,('c',))
+      return w, T
+    else:
+      Ts = []
+      for i in range(nn):
+        v = vs[:,i]
+        Ts.append(self.tensor_in(v/linalg.norm(v)))
+      return w, Ts
+
+  def asdense(self, inprefix='', outprefix='', naive=False):
+    assert naive
+    shape_in = self._fuse_in.shape
+    shape_out = self._fuse_out.shape
+    din = self.Vin.dim
+    T = None
+    rn_in = {l:inprefix+l for l in self._fuse_in._idxs}
+    rn_out = {l:outprefix+l for l in self._fuse_out._idxs}
+    for n in range(din):
+      v = np.zeros((din,))
+      v[n] = 1
+      v = v.reshape(shape_in)
+      vin = self._fuse_in.empty_like()
+      vin._T = v
+      vout = self.tensor_action(vin)
+      T1 = vout.renamed(rn_out).contract(vin.renamed(rn_in),'~*')
+      if T is None:
+        T = T1
+      else:
+        T += T1
+    return T
 
 
 class NetworkOperator(TensorOperator):
@@ -275,7 +297,7 @@ class NetworkOperator(TensorOperator):
               didx[l1] = V
             else:
               didx[l1] = ~V
-        self._fuse_in = FusionPrimitive(didx.values(),idx_in=tuple(didx.keys()))
+        self._fuse_in = args[0].buildFusion(didx.values(),idx_in=tuple(didx.keys()))
         T0 = self._fuse_in.empty_like()
         targs = list(args)
         targs.insert(tidx, T0)
@@ -284,11 +306,11 @@ class NetworkOperator(TensorOperator):
         t = args[-1]
         self.network = networks.Network.network(net,*args[:-1])
         T0 = self.network[t]
-        self._fuse_in = FusionPrimitive(T0._idxs,T0)
+        self._fuse_in = t0.getFusion(T0._idxs)
     else:
       self.network = copy(net)
       T0 = self.network[t]
-      self._fuse_in = FusionPrimitive(T0._idxs,T0)
+      self._fuse_in = t0.getFusion(T0._idxs)
     self._t0 = t
     try:
       idx = next(self.network.freeindices(unsetonly=True))
@@ -310,7 +332,7 @@ class NetworkOperator(TensorOperator):
         l = outdict[t1,ll]
         idxs.append(l)
         vs.append(self.network[t1]._dspace[ll])
-      self._fuse_out = FusionPrimitive(vs, idx_in=idxs)
+      self._fuse_out = args[0].buildFusion(vs, idx_in=idxs)
       T1 = self._fuse_out.empty_like()
     # Create network representing transposed action
     if endomorphism:
@@ -554,7 +576,7 @@ class IdentityOperator(TensorOperator):
     elif isinstance(base, FusionPrimitive):
       self._fuse_in = base
     elif isinstance(base, Tensor):
-      self._fuse_in = FusionPrimitive(base._idxs,base)
+      self._fuse_in = base.getFusion(base._idxs)
     else:
       raise NotImplementedError()
     self._fuse_out = self._fuse_in

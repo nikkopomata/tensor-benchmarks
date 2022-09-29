@@ -857,16 +857,30 @@ class Tensor:
       return fused
     return fused,info
 
+  def getFusion(self, ls, *args, **kw_args):
+    """Partial alias for FusionPrimitive constructor"""
+    return FusionPrimitive(ls,self,*args,**kw_args)
+
+  def singletonFusion(self, l):
+    """Construct fusion primitive to preserve a single index"""
+    return FusionPrimitive((l,),self)
+
+  @classmethod
+  def buildFusion(cls, ls, *args, **kw_args):
+    """Static FusionPrimitive constructor"""
+    return FusionPrimitive(ls, *args, **kw_args)
+
   def _get_fuse_prim(self, *args):
     """Produce 'info' dictionary to be used within _do_fuse"""
     infos = {}
     for arg in args:
       if len(arg) == 2:
         l1,l0s = arg
-        infos[l1] = FusionPrimitive(l0s,self)
+        infos[l1] = self.getFusion(l0s)
       elif len(arg) == 1:
         l1, = arg
-        infos[l1] = FusionPrimitive((l1,),self)
+        infos[l1] = self.singletonFusion(l1)
+      else:
         assert len(arg) == 4
         l1,l0s,fusion,conj = arg
         if not isinstance(fusion,FusionPrimitive):
@@ -1426,7 +1440,7 @@ class Tensor:
 
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,
-      mat=False, discard=False, zero_tol=None):
+      mat=False, discard=False, zero_tol=None, **kw_args):
     """Gets eigenvalue-eigenvector pairs of Tensor, with target space described
     by left indices
     herm determines whether or not the matrix being diagonalized is treated as
@@ -1460,44 +1474,7 @@ class Tensor:
       nn = A.shape[0]
     # Diagonalize
     if vecs:
-      if herm:
-        w, v = linalg.eigh(A._T, eigvals=selection)
-        if zero_tol is not None:
-          w0 = max(np.abs(w))
-          s0 = sum(w < -w0*zero_tol)
-          ncut = sum(w[s0:] < w0*zero_tol)
-          w = np.delete(w, slice(s0,s0+ncut), 0)
-          v = np.delete(v, slice(s0,s0+ncut), 1)
-          nn -= ncut
-        if left:
-          vl = v
-      else:
-        if left:
-          w, vl, v = linalg.eig(A._T, left=True)
-          # Does not return dual basis of eigenvalues
-          for i in range(vl.shape[1]):
-            vl[:,i] /= vl[:,i].dot(v[:,i].conj())
-        else:
-          w, v = linalg.eig(A._T, left=False)
-        if zero_tol is not None:
-          w0 = max(np.abs(w))
-          chi = sum(np.abs(w) > w0*zero_tol)
-          if selection:
-            selection = (selection[0], min(selection[1],chi-1))
-            nn = selection[1] - selection[0] + 1
-          else:
-            selection = (0,chi-1)
-            nn = chi
-        if selection:
-          idxw = np.argsort(-np.abs(w))
-          # Sort eigenvalues, eigenvectors
-          # NOTE: can np.delete be used for this?
-          Msort = sparse.csc_matrix((nn*[1],idxw[selection[0]:selection[1]+1],
-            range(nn+1)),dtype=int,shape=(N,nn))
-          w = Msort.__rmul__(w)
-          v = Msort.__rmul__(v)
-          if left:
-            vl = Msort.__rmul__(vl)
+      w,v,vl = _eig_vec_process(A._T, herm, left, selection, zero_tol)
       if mat:
         # Process names for eigenvector index
         if isinstance(mat,tuple):
@@ -1784,7 +1761,55 @@ class FusionPrimitive:
   @property
   def shape(self):
     return tuple(v.dim for v in self._spaces_in)
- 
+
+  def vector_convert(self, T, idx=None):
+    if idx is None:
+      idx = self._idxs
+    V,info = T._do_fuse((0,idx),prims={0:self})
+    return V._T
+
+  def tensor_convert(self, v, idx=None):
+    if idx is None:
+      idx = self._idxs
+    v = np.squeeze(v)
+    V = Tensor(v, (0,), (self._out,))
+    return V._do_unfuse({0:(idx,self)})
+
+  def tensor_convert_multiaxis(self, T, idx_newax, ax_old=0, idx_oldax=None,
+      v_newax=None):
+    if idx_oldax is None:
+      idx_oldax = self._idxs
+    shape = T.shape
+    rank = len(shape)
+    ax_old = ax_old%rank
+    if len(idx_newax) != rank-1:
+      raise ValueError(f'{rank-1} index names given for {len(idx_newax)} '
+        'new indices')
+    newshape = list(shape)
+    newshape.pop(ax_old)
+    if v_newax is None:
+      v_newax = []
+      for i,d in enumerate(shape):
+        if i == ax_old:
+          continue
+        v_newax.append(self.tensorclass._vspace_from_arg(d))
+    else:
+      v_newax = list(v_newax)
+      for i,d in enumerate(newshape):
+        if v_newax[i].dim != d:
+          raise ValueError(f'Axis \'{idx_newax[i]}\' has dimension {d}, '
+            f'expected {v_newax[i].dim}')
+    idxs = list(idx_newax)
+    ifuse = {l:l for l in idxs}
+    idxs.insert(ax_old,0)
+    v_newax.insert(ax_old,self._out)
+    T1 = self.tensorclass(T, tuple(idxs), tuple(v_newax))
+    ifuse[0] = (idx_oldax,self)
+    return T1._do_unfuse(ifuse)
+
+  @property
+  def effective_dim(self):
+    return self._out.dim
 
 class TensorTransposedView(Tensor):
   """View for tensor with indices renamed"""
@@ -1889,3 +1914,46 @@ class dictproperty:
   def items(self):
     return self.__copy__().items()
 
+def _eig_vec_process(M, herm, left, selection, zero_tol):
+  vl = None
+  if herm:
+    w, v = linalg.eigh(M, eigvals=selection)
+    if zero_tol is not None:
+      w0 = max(np.abs(w))
+      s0 = sum(w < -w0*zero_tol)
+      ncut = sum(w[s0:] < w0*zero_tol)
+      w = np.delete(w, slice(s0,s0+ncut), 0)
+      v = np.delete(v, slice(s0,s0+ncut), 1)
+      nn -= ncut
+    if left:
+      return w,v,v
+    else:
+      return w,v,None
+  else:
+    if left:
+      w, vl, v = linalg.eig(M, left=True)
+      # Does not return dual basis of eigenvalues
+      for i in range(vl.shape[1]):
+        vl[:,i] /= vl[:,i].dot(v[:,i].conj())
+    else:
+      w, v = linalg.eig(M, left=False)
+    if zero_tol is not None:
+      w0 = max(np.abs(w))
+      chi = sum(np.abs(w) > w0*zero_tol)
+      if selection:
+        selection = (selection[0], min(selection[1],chi-1))
+        nn = selection[1] - selection[0] + 1
+      else:
+        selection = (0,chi-1)
+        nn = chi
+    if selection:
+      idxw = np.argsort(-np.abs(w))
+      # Sort eigenvalues, eigenvectors
+      # NOTE: can np.delete be used for this?
+      Msort = sparse.csc_matrix((nn*[1],idxw[selection[0]:selection[1]+1],
+        range(nn+1)),dtype=int,shape=(N,nn))
+      w = Msort.__rmul__(w)
+      v = Msort.__rmul__(v)
+      if left:
+        vl = Msort.__rmul__(vl)
+  return w, v, vl
