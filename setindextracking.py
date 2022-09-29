@@ -6,3 +6,8 @@ if links._tensorimported:
   raise ValueError('Must set index tracking before initializing Tensor class')
 
 links.VSpace = links.VectorSpaceTracked
+links.spacetype = 'tracked'
+
+def weak():
+  links.VSpace = links.VectorSpaceTrackedWeak
+  links.spacetype = 'weak'

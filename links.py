@@ -2,6 +2,9 @@
 identifying indices with each other"""
 from abc import ABC, abstractmethod
 import collections
+import weakref
+
+spacetype = 'gen'
 
 class VSAbstract(ABC):
   @property
@@ -59,6 +62,8 @@ class VectorSpaceTracked(VSAbstract):
   VSided = {}
 
   def __new__(cls, *args, **kw_args):
+    if spacetype == 'weak':
+      return VectorSpaceTrackedWeak.__new__(VectorSpaceTrackedWeak, *args, **kw_args)
     if 'vsid' in kw_args:
       vsid = kw_args.pop('vsid')
       dualid = kw_args.pop('dual')
@@ -115,6 +120,93 @@ class VectorSpaceTracked(VSAbstract):
     if self.dual().__vsid is None:
       self.__dual.__gen_id()
     return ((self._dimension,),{'vsid':self.__vsid, 'dual':self.__dual.__vsid})
+
+class VectorSpaceTrackedWeak(VectorSpaceTracked):
+  """Represent vector spaces in a way capable of sophisticated identification
+  between spaces"""
+
+  VSided = weakref.WeakValueDictionary()
+
+  def __new__(cls, *args, **kw_args):
+    if 'vsid' in kw_args:
+      vsid = kw_args.pop('vsid')
+      dualid = kw_args.pop('dual')
+      dim = args[0]
+      if vsid in cls.VSided:
+        if cls.VSided[vsid].__dualid != dualid:
+          raise ValueError('vector-space ID of dual changed between pickling'
+            ' (%s->%s)'%(cls.VSided[vsid].__dualid,dualid))
+        if cls.VSided[vsid]._dimension != dim:
+          raise ValueError('dimensions indicate vector-space collision')
+        return cls.VSided[vsid]
+      else:
+        obj = super(VectorSpaceTracked,cls).__new__(cls, *args[1:], **kw_args)
+        obj.__init__(dim)
+        obj.__vsid = vsid
+        obj.__dualid = dualid
+        cls.VSided[vsid] = obj
+        if dualid in cls.VSided:
+          dual = cls.VSided[dualid]
+          obj.__dual = weakref.ref(dual)
+          dual.__dual = weakref.ref(obj)
+          assert dual.__dualid == vsid
+        #assert obj.__dual.__vsid == dualid
+        #assert obj.__dual.__dual is obj
+        #print(vsid,dualid)
+        return obj
+    return super(VectorSpaceTracked,cls).__new__(cls, *args[1:], **kw_args)
+
+  def __init__(self, dim, dual=None):
+    self._dimension = int(dim)
+    if dual is not None:
+      self.__dual = weakref.ref(dual)
+    else:
+      self.__dual = dual
+    self.__vsid = None
+    self.__dualid = None
+
+  def dual(self):
+    if self.__dual is None or self.__dual() is None:
+      dual = VectorSpaceTrackedWeak(self._dimension)
+      self.__dual = weakref.ref(dual)
+      dual.__dual = weakref.ref(self)
+      if self.__vsid is not None:
+        dual.__dualid = self.__vsid
+      if self.__dualid is not None:
+        dual.__vsid = self.__dualid
+      return dual
+    else:
+      return self.__dual()
+
+  def __eq__(self,W):
+    return self is W
+
+  def __xor__(self,W):
+    return self.__dual is not None and self.__dual() is W
+
+  def __gen_id(self):
+    from numpy import random
+    vsid = random.randint(2**30)
+    while vsid in self.__class__.VSided:
+      vsid = random.randint(2**30)
+    self.__vsid = vsid
+    if self.__dual is not None and self.__dual() is not None:
+      self.dual().__dualid = vsid
+    self.__class__.VSided[vsid] = self
+
+  def __getnewargs_ex__(self):
+    if self.__vsid is None:
+      self.__gen_id()
+    dual = self.dual()
+    if dual.__vsid is None:
+      dual.__gen_id()
+    return ((self._dimension,),{'vsid':self.__vsid, 'dual':self.__dualid})
+
+  def __getstate__(self):
+    return {}
+
+  def __setstate__(self,stt):
+    pass
 
 
 class TensorIndexDict:
