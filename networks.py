@@ -140,9 +140,9 @@ class Network:
       pstr = substrs[-1]
       if not re.fullmatch(r'(?!,)((,|^)\w+\.\w+\>\w+)*(,?(\~|\#))?',pstr):
         raise ValueError('Invalid output substring \'%s\''%pstr)
-      if pstr[-1] == '~':
+      if pstr and pstr[-1] == '~':
         auto,strict = True,False
-      elif pstr[-1] == '#':
+      elif pstr and pstr[-1] == '#':
         auto,strict = False,True
       else:
         auto = strict = False

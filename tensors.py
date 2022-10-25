@@ -268,8 +268,9 @@ class Tensor:
             if i0 >= len(tensors):
               raise ValueError('Argument #%d referenced not provided'%i0)
             if not isinstance(tensors[i0],links.VSpace):
-              raise NotImplementedError()
-            V = tensors[i0]
+              V = cls._vspace_from_arg(tensors[i0])
+            else:
+              V = tensors[i0]
             if m.group('conj'):
               vs.append(~V)
             else:
