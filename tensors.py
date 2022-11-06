@@ -183,6 +183,9 @@ class Tensor:
   def dshape(self):
     return {ll:self._dspace[ll].dim for ll in self._idxs}
 
+  def getspace(self, ll):
+    return self._dspace[ll]
+
   def __str__(self):
     return str(self._T)
 
@@ -531,6 +534,7 @@ class Tensor:
       of the form left-right or oldleft:left-right(&l2-r2&l3-r3...)
       optionally some entries may be integers (dimensions) -
       l1-r1,l2-r2,..."""
+    # TODO: module-level function?
     # Split into strings corresponding to tensors
     tensstr = parsestr.split(';')
     if len(tensors) != len(tensstr):
@@ -1444,7 +1448,7 @@ class Tensor:
 
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,
-      mat=False, discard=False, zero_tol=None, **kw_args):
+      mat=False, discard=False, zero_tol=None, reverse=False, **kw_args):
     """Gets eigenvalue-eigenvector pairs of Tensor, with target space described
     by left indices
     herm determines whether or not the matrix being diagonalized is treated as
@@ -1460,7 +1464,9 @@ class Tensor:
       otherwise will return lists; if specified as string, will be index
       (otherwise 'c')
     If left, will return eigenvalues, right eigenvectors, left eigenvectors
-    If vecs=False (and mat=False), will return eigenvalues only"""
+    If vecs=False (and mat=False), will return eigenvalues only
+    If reverse, return in reverse-sorted order from default
+      (reversal is applied after selection)"""
     A, info = self._do_fuse((0,lidx),(1,ridx,0,True))
     if discard:
       del self._T
@@ -1478,7 +1484,7 @@ class Tensor:
       nn = A.shape[0]
     # Diagonalize
     if vecs:
-      w,v,vl = _eig_vec_process(A._T, herm, left, selection, zero_tol)
+      w,v,vl = _eig_vec_process(A._T, herm, left, selection, reverse, zero_tol)
       if mat:
         # Process names for eigenvector index
         if isinstance(mat,tuple):
@@ -1516,12 +1522,16 @@ class Tensor:
         return w,vs
     else:
       if herm:
-        return linalg.eigvalsh(A._T, eigvals=selection)
+        ws = linalg.eigvalsh(A._T, eigvals=selection)
       elif selection:
         ws = linalg.eigvals(A._T)
-        return sorted(ws, key=lambda z: -abs(z))[selection[0]:selection[1]+1]
+        ws = sorted(ws, key=lambda z: -abs(z))[selection[0]:selection[1]+1]
       else:
-        return linalg.eigvals(A._T)
+        ws = linalg.eigvals(A._T)
+      if reverse:
+        return ws[::-1]
+      else:
+        return ws
 
   @_endomorphic
   def pow(self, lidx, ridx, n):
@@ -1564,6 +1574,7 @@ class Tensor:
 
   @classmethod
   def identify_indices(cls, idxs, *tens):
+    # TODO should probably document
     if not isinstance(idxs,str):
       raise ValueError('first argument must be string')
     if not all(isinstance(t, cls) for t in tens):
@@ -1918,7 +1929,7 @@ class dictproperty:
   def items(self):
     return self.__copy__().items()
 
-def _eig_vec_process(M, herm, left, selection, zero_tol):
+def _eig_vec_process(M, herm, left, selection, reverse, zero_tol):
   vl = None
   if herm:
     w, v = linalg.eigh(M, eigvals=selection)
@@ -1928,7 +1939,10 @@ def _eig_vec_process(M, herm, left, selection, zero_tol):
       ncut = sum(w[s0:] < w0*zero_tol)
       w = np.delete(w, slice(s0,s0+ncut), 0)
       v = np.delete(v, slice(s0,s0+ncut), 1)
-      nn -= ncut
+      #nn -= ncut # TODO why was this here
+    if reverse:
+      w = np.flip(w)
+      v = np.flip(v,1)
     if left:
       return w,v,v
     else:
@@ -1960,4 +1974,9 @@ def _eig_vec_process(M, herm, left, selection, zero_tol):
       v = Msort.__rmul__(v)
       if left:
         vl = Msort.__rmul__(vl)
+    if reverse:
+      w = np.flip(w)
+      v = np.flip(v,1)
+      if left:
+        vl = np.flip(vl,1)
   return w, v, vl

@@ -735,9 +735,11 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       nn = selection[1] - selection[0] + 1
     else:
       nn = A.shape[0]
+    # Check for reversal
+    reverse = ('reverse' in kw_args and kw_args['reverse'])
     # Diagonalize
     if vecs:
-      w,v,vl = _eig_vec_process(A, herm, left, selection, zero_tol)
+      w,v,vl = _eig_vec_process(A, herm, left, selection, reverse, zero_tol)
       if mat:
         return w,v,vl
       else:
@@ -760,12 +762,16 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
         return w,vs
     else:
       if herm:
-        return linalg.eigvalsh(A._T, eigvals=selection)
+        ws = linalg.eigvalsh(A._T, eigvals=selection)
       elif selection:
         ws = linalg.eigvals(A._T)
-        return sorted(ws, key=lambda z: -abs(z))[selection[0]:selection[1]+1]
+        ws = sorted(ws, key=lambda z: -abs(z))[selection[0]:selection[1]+1]
       else:
-        return linalg.eigvals(A._T)
+        ws = linalg.eigvals(A._T)
+      if reverse:
+        return ws[::-1]
+      else:
+        return ws
 
 
 class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):

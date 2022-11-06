@@ -8,6 +8,7 @@ from . import links, config, networks
 from copy import copy,deepcopy
 from abc import ABC, abstractmethod
 from numbers import Number
+from scipy.sparse.linalg import ArpackError
 
 class TensorOperator(sparse.linalg.LinearOperator, ABC):
   """Linear operator that takes in & outputs a Tensor
@@ -245,11 +246,12 @@ class NetworkOperator(TensorOperator):
     determining whether or not to treat the operator as an endomorphism
   Alternative:
     (1) valid network constructor string, network constructor arguments, then
-      name of tensor representing vector acted upon
+      name of tensor representing vector acted upon, or
     (2) network constructor string as above, but with name of tensor
-      representing vector in parentheses, no concrete vector provided"""
+      representing vector in parentheses, no concrete vector provided
+    in these cases may provide order"""
   
-  def __init__(self, net, t, *args, adjoint_order=None, endomorphism=True):
+  def __init__(self, net, t, *args, adjoint_order=None, endomorphism=True, order=None):
     if isinstance(net,str):
       args = (t,)+args
       # Network constructor argument
@@ -286,14 +288,22 @@ class NetworkOperator(TensorOperator):
           argidx += 1
         for t0,l0,t1,l1 in re.findall(r'(\w+)\.(\w+)-(\w+)\.(\w+)',clauses[-2]):
           if t0 == t:
+            if t1 not in tensors:
+              raise KeyError(f'Cannot find contracted tensor {t1} in ({t0}).{l0}-{t1}.{l1}')
             T,c = tensors[t1]
+            if l1 not in T:
+              raise KeyError(f'Cannot find contracted index {t1}.{l1} in ({t0}).{l0}-{t1}.{l1}')
             V = T._dspace[l1]
             if c:
               didx[l0] = V
             else:
               didx[l0] = ~V
           elif t1 == t:
+            if t0 not in tensors:
+              raise KeyError(f'Cannot find contracted tensor {t0} in {t0}.{l0}-({t1}).{l1}')
             T,c = tensors[t0]
+            if l0 not in T:
+              raise KeyError(f'Cannot find contracted index {t0}.{l0} in {t0}.{l0}-({t1}).{l1}')
             V = T._dspace[l0]
             if c:
               didx[l1] = V
@@ -308,11 +318,13 @@ class NetworkOperator(TensorOperator):
         t = args[-1]
         self.network = networks.Network.network(net,*args[:-1])
         T0 = self.network[t]
-        self._fuse_in = t0.getFusion(T0._idxs)
+        self._fuse_in = T0.getFusion(T0._idxs)
+      if order is not None:
+        self.network.setorder(order)
     else:
       self.network = copy(net)
       T0 = self.network[t]
-      self._fuse_in = t0.getFusion(T0._idxs)
+      self._fuse_in = T0.getFusion(T0._idxs)
     self._t0 = t
     try:
       idx = next(self.network.freeindices(unsetonly=True))
