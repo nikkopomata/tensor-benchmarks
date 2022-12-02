@@ -6,6 +6,7 @@ from .npstack import np,RNG,linalg,safesvd,sparse
 from abc import ABCMeta, abstractmethod
 import itertools
 import functools
+import sys
 from copy import copy
 from . import tensors
 from . import links
@@ -57,7 +58,12 @@ class GroupType(ABCMeta):
       cls._registry[label] = obj
       obj.__setattr__('label',label)
       obj.label = label
-    return cls._registry[label]
+    else:
+      obj = cls._registry[label]
+    if 'derivedtypes' in kwargs: # Re-generate derived types as necessary
+      for der_cls in kwargs['derivedtypes'].values():
+        der_cls.derive(obj)
+    return obj
 
 
 class Group(metaclass=GroupType):
@@ -102,6 +108,7 @@ class Group(metaclass=GroupType):
     self._CG = {}
     if self.quaternionic:
       self._Ss = {}
+    self._derived_registry = {} # Register derived types (regname:superclass)
 
   @classmethod
   @abstractmethod
@@ -265,9 +272,23 @@ class Group(metaclass=GroupType):
     assert h != hd
     return h > hd
 
-  def __getnewargs__(self):
+  def __reduce__(self):
     """By default assume singleton"""
-    return ()
+    return self.__class__, ()
+
+#  def __getnewargs__(self):
+#    """By default assume singleton"""
+#    return ()
+#
+#  def __getstate__(self):
+#    return {}
+#
+#  def __setstate__(self, state):
+#    pass
+
+#  def __getnewargs_ex__(self):
+#    """By default assume singleton"""
+#    return (),{'derivedtypes':self._derived_registry}
 
 
 class U1(Group):
@@ -916,13 +937,23 @@ class GroupDerivedType(ABCMeta):
     """Produce subclass corresponding to group"""
     if hasattr(group, cls._regname):
       return getattr(group, cls._regname)
-    subcl = GroupDerivedType(str(group.label)+'_'+cls.__name__, (cls,),
-          {'group':group, '__reduce__': lambda self: (cls.derive, (group,)) })
+    name = str(group.label)+'_'+cls.__name__
+    subcl = GroupDerivedType(name, (cls,), {'group':group})
+    #      {'group':group, '__reduce__': lambda self: (cls.derive, (group,)) })
     setattr(group, cls._regname, subcl)
+    modname = cls.__module__
+    setattr(subcl, '__module__', modname)
+    setattr(sys.modules[modname], name, subcl)
+    subcl._reconstructor = DerivedTypeReconstructor(cls, group)
+    group._derived_registry[cls._regname] = cls
     if hasattr(cls, '_required_types'):
       for cls2 in cls._required_types:
         cls2.derive(group)
     return subcl
+
+  def __reduce__(cls):
+    supcls = cls.__bases__[0]
+    return (GroupDerivedType.derive,(supcls,cls.group))
 
 
 class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
@@ -1003,3 +1034,31 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
       if k1 == k:
         return n
     return 0
+
+  #def __getnewargs__(self):
+  #  return (self._decomp,)
+
+  def __reduce__(self):
+    return self._reconstructor, (self._decomp,)
+
+
+class DerivedTypeReconstructor:
+  """Callable to provide to pickler for GroupDerivedType
+  Ensure that class is (re)-constructed before re-initializing objects"""
+  def __init__(self, cls, group):
+    self.superclass = cls
+    self.group = group
+    self.derived = cls.derive(group)
+
+  def __call__(self, *args, **kwargs):
+    return self.derived(*args, **kwargs)
+
+  #def __getnewargs__(self):
+  #  print('Pickling DerivedTypeReconstructor corresponding to',self.group.label,self.superclass._regname)
+  #  return (self.superclass,self.group)
+
+  def __getstate__(self):
+    return (self.superclass, self.group)
+
+  def __setstate__(self, state):
+    self.__init__(*state)

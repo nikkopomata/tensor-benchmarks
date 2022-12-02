@@ -108,22 +108,7 @@ class Tensor:
     Takes list or np.ndarray t, list (as list or comma-separated string) of
     index names
     If string, may include matching (:L) or dual-matching (:L*)"""
-    matchdata = {}
-    if isinstance(idxs,str):
-      if not re.fullmatch(r'\w+(,\w+(\:\w+\*?)?)*',idxs):
-        raise ValueError('Invalid (not alphanumeric + _) index name in %s'%idxs)
-      idxs = idxs.split(',')
-      for ii in range(len(idxs)):
-        if not re.fullmatch(r'\w+',idxs[ii]):
-          m = re.fullmatch(r'(\w+)\:(\w+)(\*?)',idxs[ii])
-          idxs[ii], l1, c = m.groups()
-          if l1 not in idxs[:ii]:
-            raise ValueError('Index %s referred to before definition'%l1)
-          matchdata[idxs[ii]] = (l1, bool(c))
-    else:
-      for ll in idxs:
-        if not isinstance(ll,str) or not re.fullmatch(r'\w+',ll):
-          raise ValueError('Invalid (non-alphanumeric) index name %s'%ll)
+    idxs,matchdata = indexparse(idxs)
     try:
       T = np.array(t,dtype=config.FIELD,copy=True)
     except:
@@ -312,6 +297,10 @@ class Tensor:
         vs.append(V)
     return cls(T, idxs, tuple(vs))
 
+  def init_fromT(self, T, parsestr, *tensors, **settings):
+    """init_from, but 'self' is first tensor argument"""
+    return self.__class__.init_from(T, parsestr, self, *tensors, **settings)
+
   def permuted(self, order):
     """Return tensor permuted according to order"""
     if set(self._idxs) != set(order):
@@ -478,6 +467,10 @@ class Tensor:
           dims.append(V.dim)
     return cls(np.zeros(tuple(dims),dtype=config.FIELD), tuple(idxs), tuple(vs))
 
+  def zeros_fromT(self, parsestr, *tensors):
+    """zeros_from, but with 'self' as first tensor argument"""
+    return self.__class__.zeros_from(parsestr, self, *tensors)
+
   @classmethod
   def _identity(cls, left, right, spaces):
     """identity constructor:
@@ -590,6 +583,11 @@ class Tensor:
     assert r2 == len(idx1) and r2 == len(vs)
     return cls._identity(idx0,idx1,vs)
 
+  @classmethod
+  def id_fromT(self, parsestr, *tensors):
+    """id_from, but with 'self' for first tensor argument"""
+    return self__class__.id_from(parsestr, self, *tensors)
+
   def id_extend(self, parsestr, *tensors):
     """Extend self by multiplication with identity tensor based on indices
       of self and/or additional tensors (as in id_from)
@@ -635,6 +633,9 @@ class Tensor:
     A = cls.zeros_from(parsestr, *tensors)
     A._T = _np_rand(copy(A.shape), **settings)
     return A
+
+  def rand_fromT(self, parsestr, *tensors, **settings):
+    return self.__class__.rand_from(parsestr, self, *tensors, **settings)
 
   def _rename_dynamic(self, idxmap):
     """Rename indices of tensor (do not copy)"""
@@ -743,6 +744,7 @@ class Tensor:
 
   def ctranspose(self, parsestr, strict=True):
     """Return conjugate-transpose tensor; syntax as in transpose"""
+    # TODO dagger of non-endomorphism
     if isinstance(parsestr, dict):
       idxmap = parsestr
     else:
@@ -1501,6 +1503,7 @@ class Tensor:
         RV = self.__class__(v, (0,'c'), (A._spaces[0], links.VSpace(nn)))
         RT = RV._do_unfuse({0:(lidx,info[0]),'c':cr})
         if left:
+          # TODO account for non-Hermitian
           LV = RV._init_like(vl).conj()
           LT = LV._do_unfuse({0:(ridx,info[1]),'c':cl})
           return w, RT, LT
@@ -1514,7 +1517,7 @@ class Tensor:
         if left: 
           vls = []
           init_args = ((1,), (A._spaces[1]))
-          d_unfuse = {1:(lidx,info[1][1:])}
+          d_unfuse = {1:(ridx,info[1][1:])}
           for i in range(nn):
             vl = vl.conj()
             vls.append(self.__class__(vl[:,i], *init_args)._do_unfuse(d_unfuse))
@@ -1929,12 +1932,12 @@ class dictproperty:
   def items(self):
     return self.__copy__().items()
 
-def _eig_vec_process(M, herm, left, selection, reverse, zero_tol):
+def _eig_vec_process(M, herm, left, selection, reverse, zero_tol, zt_rel=None):
   vl = None
   if herm:
     w, v = linalg.eigh(M, eigvals=selection)
     if zero_tol is not None:
-      w0 = max(np.abs(w))
+      w0 = max(np.abs(w)) if zt_rel is None else zt_rel
       s0 = sum(w < -w0*zero_tol)
       ncut = sum(w[s0:] < w0*zero_tol)
       w = np.delete(w, slice(s0,s0+ncut), 0)
@@ -1956,7 +1959,7 @@ def _eig_vec_process(M, herm, left, selection, reverse, zero_tol):
     else:
       w, v = linalg.eig(M, left=False)
     if zero_tol is not None:
-      w0 = max(np.abs(w))
+      w0 = max(np.abs(w)) if zt_rel is None else zt_rel
       chi = sum(np.abs(w) > w0*zero_tol)
       if selection:
         selection = (selection[0], min(selection[1],chi-1))
@@ -1967,16 +1970,40 @@ def _eig_vec_process(M, herm, left, selection, reverse, zero_tol):
     if selection:
       idxw = np.argsort(-np.abs(w))
       # Sort eigenvalues, eigenvectors
-      # NOTE: can np.delete be used for this?
-      Msort = sparse.csc_matrix((nn*[1],idxw[selection[0]:selection[1]+1],
-        range(nn+1)),dtype=int,shape=(N,nn))
-      w = Msort.__rmul__(w)
-      v = Msort.__rmul__(v)
+      #Msort = sparse.csc_matrix((nn*[1],idxw[selection[0]:selection[1]+1],
+      #  range(nn+1)),dtype=int,shape=(M.shape[0],nn))
+      #w = Msort.__rmul__(w) #v = Msort.__rmul__(v)
+      idxsel = idxw[selection[0]:selection[1]+1]
+      w = w[idxsel]
+      v = v[:,idxsel]
       if left:
-        vl = Msort.__rmul__(vl)
+        vl = vl[:,idxsel]
     if reverse:
       w = np.flip(w)
       v = np.flip(v,1)
       if left:
         vl = np.flip(vl,1)
   return w, v, vl
+
+def indexparse(idxs):
+  """Parse index list as in Tensor.tensor"""
+  # TODO make full-purpose parsing module?
+  if isinstance(idxs,str):
+    matchdata = {}
+    if not re.fullmatch(r'\w+(,\w+(\:\w+\*?)?)*',idxs):
+      raise ValueError('Invalid (not alphanumeric + _) index name in %s'%idxs)
+    idxs = idxs.split(',')
+    for ii in range(len(idxs)):
+      if not re.fullmatch(r'\w+',idxs[ii]):
+        m = re.fullmatch(r'(\w+)\:(\w+)(\*?)',idxs[ii])
+        idxs[ii], l1, c = m.groups()
+        if l1 not in idxs[:ii]:
+          raise ValueError('Index %s referred to before definition'%l1)
+        matchdata[idxs[ii]] = (l1, bool(c))
+    return idxs,matchdata
+  else:
+    for ll in idxs:
+      if not isinstance(ll,str) or not re.fullmatch(r'\w+',ll):
+        raise ValueError('Invalid (non-alphanumeric) index name %s'%ll)
+    return idxs,{}
+

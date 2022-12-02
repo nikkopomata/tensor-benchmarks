@@ -124,6 +124,7 @@ class VectorSpaceTracked(VSAbstract):
 class VectorSpaceTrackedWeak(VectorSpaceTracked):
   """Represent vector spaces in a way capable of sophisticated identification
   between spaces"""
+  # TODO compatibility with SumRepresentation?
 
   VSided = weakref.WeakValueDictionary()
 

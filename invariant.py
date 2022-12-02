@@ -9,6 +9,7 @@ from . import links,config,tensors,groups
 from .groups import Group,GroupDerivedType,SumRepresentation
 from .tensors import Tensor,FusionPrimitive,_endomorphic,_eig_vec_process
 
+# TODO do InvariantFusion + SubstantiatingFusion need to be pickleable?
 class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
   """Determine fusion for indices invariant under group action
   Calculates 'Clebsch-Gordan' matrices"""
@@ -279,6 +280,13 @@ class SubstantiatingFusion(InvariantFusion):
     T = np.empty(self.shape,dtype=config.FIELD)
     return self.group.ChargedTensor(T, idxs, self._spaces_in, self._irrep)
 
+  @property
+  def irrep_idx(self):
+    # TODO was this not supposed to be overridden in this subclass for some reason?
+    if self._rep_idx is None:
+      self._rep_idx = self._out.idx_of(self.irrep)
+    return self._rep_idx
+
 
 class GroupTensor(Tensor,metaclass=GroupDerivedType):
   """Abstract class encompassing tensors which transform (trivially or
@@ -468,6 +476,16 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
     # For the time being return copy, not view
     return Tensor.renamed(self, idxmap, False, strict)
 
+  def symmetry_broken(self):
+    """Convert to symmetryless Tensor object"""
+    # TODO apply on larger scale, make compatible with VS tracking
+    # TODO same for semi-local conversion of natural reps?
+    return tensors.Tensor(self._T.copy(), self._idxs, tuple(links.VSpace(V.dim) for V in self._spaces))
+
+  @property
+  def charge(self):
+    return self._irrep
+
 
 class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
   """Tensors which are invariant under transformations
@@ -488,7 +506,7 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     if irrep is None or irrep == self._irrep:
       return self.group.Tensor(T, idxs, spaces)
     else:
-      return self.group.ChargedTensor(T, idxs, spaces, irrep)
+      return ChargedTensor.derive(self.group)(T, idxs, spaces, irrep)
 
   def _rand_init(self, **settings):
     if self.rank == 1:
@@ -676,8 +694,30 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     if mat:
       if irrep is None:
         irrep = 'all'
-      raise NotImplementedError()
+      if irrep != 'all':
+        raise NotImplementedError()
+      # TODO allow for nontrivial selection of irreps
+      if isinstance(mat,tuple):
+        cr,cl = mat
+      elif isinstance(mat,str):
+        cr = cl = mat
+      else:
+        cr = cl = 'c'
+      if cr in lidx or not re.fullmatch(r'\w+',cr):
+        raise ValueError('new center index %s invalid'%s)
+      if left and (cl in ridx or not re.fullmatch(r'\w+',cl)):
+        raise ValueError('new center index for left-eigenvectors'
+          ' %s invalid'%s)
+      w,vR,vL = A._eig_mat(herm, selection, left, zero_tol, **kw_args)
+      vR = vR._do_unfuse({0:(lidx,info[0]),'c':cr})
+      if left:
+        print('left is symmetric',abs(vL-vL.symmetrized()),end=' ')
+        vL = vL._do_unfuse({0:(ridx,info[1]),'c':cl})
+        print(abs(vL-vL.symmetrized()))
+        return w,vR,vL
+      return w,vR
     else:
+      fnorm = abs(A)
       if irrep is None:
         irrep = 'neutral'
       if irrep == 'all':
@@ -687,7 +727,7 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       if isinstance(irrep, list):
         rvs = {}
         for k in irrep:
-          rv = A._eig_irrep(k, herm, selection, left, vecs, mat, zero_tol,
+          rv = A._eig_irrep(k, herm, selection, left, vecs, mat, zero_tol,fnorm,
             **kw_args)
           if rv is None or (not vecs and len(rv)==0) or (vecs and len(rv[0])==0):
             continue
@@ -703,7 +743,7 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
         return rvs
       else:
         rv = A._eig_irrep(irrep, herm, selection, left, vecs, mat, zero_tol,
-          **kw_args)
+          fnorm, **kw_args)
         if vecs:
           d_unfuse = {0:(lidx,info[0])}
           if left:
@@ -714,7 +754,7 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
               rv[2][i] = rv[2][i]._do_unfuse(d_unfuse_l)
         return rv
 
-  def _eig_irrep(self, irrep, herm, selection, left, vecs, mat, zero_tol,
+  def _eig_irrep(self, irrep, herm, selection, left, vecs, mat, zero_tol, frob,
       **kw_args):
     assert self.idxset == {0,1}
     kd = self.group.dual(irrep)
@@ -739,10 +779,12 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     reverse = ('reverse' in kw_args and kw_args['reverse'])
     # Diagonalize
     if vecs:
-      w,v,vl = _eig_vec_process(A, herm, left, selection, reverse, zero_tol)
+      w,v,vl = _eig_vec_process(A, herm, left, selection, reverse, zero_tol,
+        zt_rel=frob)
       if mat:
         return w,v,vl
       else:
+        nn = len(w)
         vs = []
         init_args = ((0,), (self._spaces[0],))
         v1 = np.zeros((self.dshape[0],nn),config.FIELD)
@@ -750,28 +792,127 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
         for i in range(nn):
           vs.append(self._tensorfactory(v1[:,i], *init_args,irrep=irrep))
         if left: 
+          # TODO probably broken
           vls = []
           init_args = ((1,), (self._spaces[1]))
           vl1 = np.zeros_like(v1)
-          vl1[idx:idx+d*N:d,:] = v
+          vl1[idx:idx+d*N:d,:] = vl.conj()
           for i in range(nn):
-            vl = vl.conj()
             # NOTE: may need to modify for quaternionic irreps
             vls.append(self._tensorfactory(vl1[:,i], *init_args,irrep=kd))
             return w,vs,vls
         return w,vs
     else:
       if herm:
-        ws = linalg.eigvalsh(A._T, eigvals=selection)
+        ws = linalg.eigvalsh(A, eigvals=selection)
       elif selection:
-        ws = linalg.eigvals(A._T)
+        ws = linalg.eigvals(A)
         ws = sorted(ws, key=lambda z: -abs(z))[selection[0]:selection[1]+1]
       else:
-        ws = linalg.eigvals(A._T)
+        ws = linalg.eigvals(A)
+      if zero_tol is not None:
+        ws = ws[np.argwhere(np.abs(ws)>zero_tol).flatten()]
       if reverse:
         return ws[::-1]
       else:
         return ws
+
+  def _eig_mat(self, herm, selection, left, zero_tol, **kw_args):
+    """Helper function for eig (must provide endomorphic matrix)
+    for case where matrix form is requested"""
+    T = self.permuted((0,1))
+    VL = self._dspace[0]
+    VR = self._dspace[1]
+    dim0 = VL.dim
+    vLs = {} # Sector-wise left eigenvector matrices
+    ws = {} # Sector-wise eigenvalues
+    vRs = {} # Sector-wise right eigenvector matrices
+    s_presort = [] # Sortable list of eigenvalues w/ irrep info
+    idx = 0
+    snorm = np.linalg.norm(T)
+    D0 = 0
+    # TODO either broaden selection options or do away with it
+    assert selection is None or isinstance(selection,int)
+    # Check for reversal
+    reverse = ('reverse' in kw_args and kw_args['reverse'])
+    for k,n in VL:
+      # k is from left index symmetry => irrep of right eigenvectors
+      d = self.group.dim(k)
+      idx1 = idx+d*n
+      kd = self.group.dual(k)
+      Tk = T[idx:idx1:d,idx:idx1:d]
+      ws[k],vRs[k],vLs[k] = _eig_vec_process(Tk, herm, left, None, False, zero_tol,zt_rel=snorm)
+      D0 += len(ws[k])*d
+      if selection is not None:
+        sortable = ws[k] if herm else -np.abs(ws[k])
+        s_presort.extend((sv,k,d) for sv in sortable)
+      idx = idx1
+    assert idx == dim0 # DEBUG
+    if selection is not None and D0 > abs(selection):
+      chi = abs(selection)
+      sgn = (-1)**(selection<0)
+      s_sort = sorted(s_presort, key=lambda st:sgn*st[0])
+      D = 0
+      Dks = collections.defaultdict(int)
+      while s_sort and D < chi:
+        ev,k,d = s_sort.pop(0)
+        D += d
+        Dks[k] += 1
+      if config.degen_tolerance:
+        chi_max = dim0
+        while s_sort and D < chi_max:
+          ev1,k,d = s_sort.pop(0)
+          if abs(1-abs(ev1/ev)) > config.degen_tolerance:
+            break
+          Dks[k] += 1
+          D += d
+          ev1 = ev
+      # Trim
+      # TODO check
+      wred = {}
+      vLred = {}
+      vRred = {}
+      for k,n in Dks.items():
+        sortable = ws[k] if herm else -np.abs(ws[k])
+        idxsort = np.argsort(sgn*sortable)[:n]
+        if reverse:
+          idxsort = idxsort[::-1]
+        wred[k] = ws[k][idxsort]
+        vRred[k] = vRs[k][:,idxsort]
+        if left:
+          vLred[k] = vLs[k][:,idxsort]
+      ws,vLs,vRs = wred,vLred,vRred   
+    else:
+      Dks = {k:len(ws[k]) for k in ws}
+    V_cl = self.group.SumRep(list(Dks.items()))
+    dim1 = V_cl.dim
+    V_cr = V_cl.dual()
+    vR = np.zeros((dim0,dim1), dtype=config.FIELD)
+    w = []
+    if left:
+      vL = np.zeros((dim0, dim1), dtype=config.FIELD)
+    ic = 0
+    for k,n in V_cl:
+      if n == 0:
+        continue
+      d = self.group.dim(k)
+      idx = VL.idx_of(k)
+      vk = np.kron(vRs[k],np.identity(d))
+      vR[idx:idx+vk.shape[0],ic:ic+d*n] = vk
+      w.extend(np.repeat(ws[k],d))
+      if left:
+        vk = np.kron(vLs[k].conj(),np.identity(d))
+        vL[idx:idx+vk.shape[0],ic:ic+d*n] = vk
+      ic += d*n
+    vR = self.__class__(vR, (0,'c'), (VL,V_cr))
+    if left:
+      vL = self.__class__(vL, (0,'c'), (VR,V_cl))
+      return w,vR,vL
+    return w,vR,None
+
+
+  def __reduce__(self):
+    return self._reconstructor, (self._T, self._idxs, self._spaces)
 
 
 class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
@@ -840,6 +981,30 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     return self.group.InvariantTensor(T1.reshape((-1,M.shape[1])), (0,1),
       (fpr._out_subst, fpr.V))
 
+  def substantiate(self, idx):
+    """Convert into invariant tensor with explicit index 'idx'"""
+    # TODO split & pass to _svd_fuse?
+    assert idx not in self._idxs
+    d = self.group.dim(self._irrep)
+    kd = self.group.dual(self._irrep)
+    vnew = self.group.SumRep([(self._irrep,1)])
+    if d == 1:
+      T = np.expand_dims(self._T, self.rank)
+      return self.group.Tensor(T,self._idxs+(idx,),self._spaces+(vnew,))
+    M, f = self._do_fuse((0,self._idxs))
+    MT = M._T
+    Msub = np.zeros(MT.shape+(d,),dtype=config.FIELD)
+    if kd not in f[0].V:
+      assert self.group.indicate(kd) < 0 and self._irrep in f[0].V
+      kd = self._irrep
+      vnew = vnew.dual()
+    i0 = f[0].V.idx_of(kd)
+    nk = f[0].V.degen_of(kd)
+    Mk = np.expand_dims(MT[i0:i0+nk*d:d],1)
+    Msub[i0:i0+nk*d,:] = np.kron(Mk,np.identity(d,dtype=config.FIELD))
+    Msub = self.group.Tensor(Msub,(0,1),M._spaces+(vnew,))
+    return Msub._do_unfuse({0:(self._idxs,f[0]),1:idx})
+
   def symmetrized(self):
     kd = self.group.dual(self._irrep)
     d = self.group.dim(self._irrep)
@@ -861,9 +1026,60 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     T._irrep = self.group.dual(self._irrep)
     return T
 
+  def __reduce__(self):
+    return self._reconstructor, (self._T, self._idxs, self._spaces, self._irrep)
+
 
 class InvariantTransposedView(InvariantTensor, tensors.TensorTransposedView,
     metaclass=GroupDerivedType):
   _regname='TransposedView'
   _required_types=(InvariantTensor,)
   pass
+
+def invariant_of(group, T, idxs, sreps=None, irrep=None):
+  """Factory for InvariantTensor/ChargedTensor classes
+  (helps to avoid having to explicitly derive required classes) 
+  idxs is tuple or string (latter to support matching or dual-matching)
+  sreps is tuple or dictionary of sum-representation lists or
+    SumRepresentation objects
+  Supports providing T as Tensor (in which case idxs may be omitted & sreps
+    should be provided as dictionary)
+  if irrep is provided (and not trivial), will be ChargedTensor"""
+  if isinstance(T, Tensor):
+    if not isinstance(idxs, str) and (not isinstance(idxs, tuple) or isinstance(idxs[0],str)):
+      # idxs does not identify indices
+      if irrep is not None:
+        idxs,sreps = T._idxs, idxs
+      else:
+        idxs,sreps,irrep = T._idxs,idxs,sreps
+    T = T._T.copy()
+  else:
+    try:
+      T = np.array(T,dtype=config.FIELD,copy=True)
+    except:
+      raise ValueError('type provided cannot be converted to numpy.ndarray')
+  idxs, matchdata = tensors.indexparse(idxs)
+  assert len(idxs) == T.ndim
+  GRep = SumRepresentation.derive(group)
+  Vs = []
+  Vd = {}
+  aslist = (isinstance(sreps, tuple) or isinstance(sreps, list))
+  assert aslist or isinstance(sreps, dict)
+  for ii,ll in enumerate(idxs):
+    if ll in matchdata:
+      l1,c = matchdata[ll]
+      V = Vd[l1]
+      if c:
+        V = V.dual()
+    else:
+      V = sreps[ii] if aslist else sreps[ll]
+      if not isinstance(V,GRep):
+        V = GRep(V)
+    Vd[ll] = V
+  Vs = tuple(Vd[ll] for ll in idxs)
+  if irrep and group.triv != irrep:
+    GTensor = ChargedTensor.derive(group)
+    return GTensor(T, idxs, Vs, irrep)
+  else:
+    GTensor = InvariantTensor.derive(group)
+    return GTensor(T, idxs, Vs)
