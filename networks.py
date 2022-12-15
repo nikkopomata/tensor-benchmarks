@@ -350,7 +350,7 @@ class Network:
     i0 = self._tdict[t]
     if rel:
       c ^= self._conj[t]
-    self._tlist[i0].matches(T, c ^ self._conj[t])
+    self._tlist[i0].matches(T, c ^ self._conj[t], strict=False)
     self._conj[t] = c
     if len(self._tset[i0]) == 1:
       # Full replacement
@@ -1126,7 +1126,7 @@ class Network:
       lcont = {t1:1 for t1 in self._bonded[t]}
       bonds = self._tbonds[t]
       for l in T._idxs:
-        d = T.shape[l]
+        d = int(T.shape[l])
         if l in bonds:
           lcont[bonds[l][0]] *= d
         else:
@@ -1144,7 +1144,7 @@ class Network:
       rcont = {t1:1 for t1 in self._bonded[t]}
       bonds = self._tbonds[t]
       for l in T._idxs:
-        d = T.shape[l]
+        d = int(T.shape[l])
         if l in bonds:
           rcont[bonds[l][0]] *= d
         else:

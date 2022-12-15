@@ -38,6 +38,10 @@ class VSAbstract(ABC):
     else:
       return self == W
 
+  def trim(self, boolidx):
+    assert len(boolidx) == self._dimension
+    return self.__class__(sum(boolidx))
+
 
 class VectorSpace(VSAbstract):
   """Basic class to represent vector spaces. Only attribute is dim"""

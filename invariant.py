@@ -188,8 +188,11 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
       idx = self._idxs
     v1 = np.zeros((self._out.dim,),dtype=config.FIELD)
     v1[self.irrep_idx:self.irrep_idx+self.effective_dim] = np.squeeze(v)
-    V = self.group.Tensor(v1,(0,),(self._out,))
+    V = self.asflattensor(v1)
     return V._do_unfuse({0:(idx,self)})
+
+  def asflattensor(self, v1):
+    return self.group.Tensor(v1,(0,),(self._out,))
 
   def tensor_convert_multiaxis(self, T, idx_newax, ax_old=0, **kw_args):
     shape = list(T.shape)
@@ -202,16 +205,22 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
     T1[tuple(sls)] = T
     return super().tensor_convert_multiaxis(T1, idx_newax, ax_old, **kw_args)
 
-  @classmethod
   @property
-  def _tensor_class(cls):
-    return cls.group.Tensor
+  def tensorclass(self):
+    return self.group.Tensor
 
   def empty_like(self, idxs=None):
     if idxs is None:
       idxs = self._idxs
     T = np.empty(self.shape,dtype=config.FIELD)
     return self.group.Tensor(T, idxs, self._spaces_in)
+
+  def substantiating(self, irrep):
+    """Return substantiating version of self"""
+    assert self.group.isrep(irrep)
+    cls = SubstantiatingFusion.derive(self.group)
+    return cls(self._spaces_in, v_out=self._out, idx_in=self._idxs,
+      CG=self._CGmat, irrep=irrep)
 
 
 class SubstantiatingFusion(InvariantFusion):
@@ -223,6 +232,8 @@ class SubstantiatingFusion(InvariantFusion):
 
   def __init__(self, vs_in, v_out=None, idx_in=None, CG=None,
       irrep=None, subst_info=None):
+    self._rep_idx = None
+    self._dimeff = None
     InvariantFusion.__init__(self, vs_in, v_out, idx_in, CG)
     self._irrep = irrep
     if subst_info is None:
@@ -236,6 +247,7 @@ class SubstantiatingFusion(InvariantFusion):
     (other representations in order),
     produce transformation from
     (flattened array w/implicit index) -> (flattened invariant array)"""
+    # TODO probably very broken
     # Fusion of explicit indices
     f,CG = self.CG_tree((self._out,)+reps)
     d = self.group.dim(self._irrep)
@@ -269,10 +281,12 @@ class SubstantiatingFusion(InvariantFusion):
         CG=CG,irrep=self.group.dual(self._irrep),
         subst_info=(~self._out_subst,CGsubst))
 
-  @classmethod
+  def asflattensor(self, v1):
+    return self.group.ChargedTensor(v1,(0,),(self._out,),self._irrep)
+
   @property
-  def _tensor_class(cls):
-    return cls.group.ChargedTensor
+  def tensorclass(self):
+    return self.group.ChargedTensor
 
   def empty_like(self, idxs=None):
     if idxs is None:
@@ -284,8 +298,14 @@ class SubstantiatingFusion(InvariantFusion):
   def irrep_idx(self):
     # TODO was this not supposed to be overridden in this subclass for some reason?
     if self._rep_idx is None:
-      self._rep_idx = self._out.idx_of(self.irrep)
+      self._rep_idx = self._out.idx_of(self._irrep)
     return self._rep_idx
+
+  @property
+  def effective_dim(self):
+    if self._dimeff is None:
+      self._dimeff = self._out.degen_of(self._irrep)
+    return self._dimeff
 
 
 class GroupTensor(Tensor,metaclass=GroupDerivedType):
@@ -376,15 +396,16 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       if sum(subindicate) > 1 or isinstance(self, ChargedTensor):
         raise ValueError('Attempting to unfuse multiple implicit indices')
       idx = subindicate.index(True)
-      ll = self._idxs[ll]
+      ll = self._idxs[idx]
       sfuse = fuseinfo[ll][1]
       irrep = sfuse._irrep
-      T = T.moveaxis(idx,0)
+      d = self.group.dim(irrep)
       shape = T.shape
+      T = np.moveaxis(T,idx,0)
       T = T.reshape((shape[idx],-1))
       T = sfuse._CG_subst.transpose().conj().dot(T)
-      T = T.reshape((shape[idx],self.group.dim(irrep),-1))[:,0,:]
-      T = T.moveaxis(0,idx).reshape(shape[:idx]+(shape[idx],)+shape[idx+1:])
+      T = T.reshape((shape[idx],d,-1))[:,0,:]
+      T = np.moveaxis(T,0,idx).reshape(shape[:idx]+(shape[idx]//d,)+shape[idx+1:])
     else:
       irrep = None
     for ll in self._idxs:
@@ -425,7 +446,30 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
 
   @classmethod
   def rand_from(cls, parsestr, *tens, **settings):
-    A = cls.zeros_from(parsestr, *tens)
+    """If charged, must either pass argument "irrep" or provide tensor with
+    same transformation property as first tensor argument"""
+    if 'irrep' in settings:
+      irrep = settings.pop('irrep')
+      if irrep == cls.group.triv:
+        charged = False
+      else:
+        charged = True
+    elif issubclass(cls,ChargedTensor):
+      if not isinstance(tens[0],cls):
+        raise TypeError('Must determine irrep either implicitly or explicitly')
+      irrep = tens[0]._irrep
+      charged = (irrep != cls.group.triv)
+    else:
+      charged = False
+    # Change class if necessary
+    if charged and not issubclass(cls,ChargedTensor):
+      cls = ChargedTensor.derive(cls.group)
+    elif not charged and issubclass(cls,ChargedTensor):
+      cls = cls.group.Tensor
+    if charged:
+      A = cls.zeros_from(parsestr, *tens, init_args=(irrep,))
+    else:
+      A = cls.zeros_from(parsestr, *tens)
     A._rand_init(**settings)
     return A
 
@@ -450,6 +494,32 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
 
   def _do_contract(self, T2, contracted, out1, out2, conj):
     # Various cases depending on invariance
+    irrep = None
+    if not isinstance(T2, GroupTensor):
+      # Non-invariant tensor
+      cswitch = [(r,l) for l,r in contracted]
+      if conj:
+        T2 = T2.conj()
+      return Tensor._do_contract(T2, self, cswitch, out2, out1, False)
+    elif self.group is not T2.group:
+      raise ValueError('Cannot contract tensors with non-matching groups')
+    elif isinstance(self, ChargedTensor):
+      if isinstance(T2, ChargedTensor):
+        # Both are charged - must be dual
+        if not (conj and T2._irrep == self._irrep) and not (not conj and T2._irrep == self.group.dual(self._irrep)):
+          raise NotImplementedError('Contraction of non-dual charged tensors not yet'
+          ' implemented')
+        irrep = self.group.triv
+    else:
+      if conj:
+        irrep = self.group.dual(T2._irrep)
+      else:
+        irrep = T2._irrep
+    return Tensor._do_contract(self, T2, contracted, out1, out2, conj, irrep=irrep)
+
+  def _do_contract_old(self, T2, contracted, out1, out2, conj):
+    # Various cases depending on invariance
+    # TODO old version, delete after testing
     switch = False
     if not isinstance(T2, GroupTensor):
       # Non-invariant tensor
@@ -497,8 +567,8 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     super().__init__(T, idxs, spaces)
     self._irrep = self.group.triv
 
-  def matches(self, A, conj):
-    if not isinstance(A, self.group.Tensor):
+  def matches(self, A, conj, strict=True):
+    if strict and not isinstance(A, self.group.Tensor):
       raise ValueError('Failure to match symmetry group')
     Tensor.matches(self, A, conj)
 
@@ -583,6 +653,8 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
         # Get block
         ir = VR.idx_of(kd)
         nr = VR.degen_of(kd)
+        if n == 0 or nr == 0:
+          continue
         Tk = T[il:il+d*n:d,ir:ir+d*nr:d]
         U,s,Vd = safesvd(Tk)
         # First truncate based on singular value tolerance
@@ -711,9 +783,7 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       w,vR,vL = A._eig_mat(herm, selection, left, zero_tol, **kw_args)
       vR = vR._do_unfuse({0:(lidx,info[0]),'c':cr})
       if left:
-        print('left is symmetric',abs(vL-vL.symmetrized()),end=' ')
         vL = vL._do_unfuse({0:(ridx,info[1]),'c':cl})
-        print(abs(vL-vL.symmetrized()))
         return w,vR,vL
       return w,vR
     else:
@@ -744,6 +814,8 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       else:
         rv = A._eig_irrep(irrep, herm, selection, left, vecs, mat, zero_tol,
           fnorm, **kw_args)
+        if rv is None:
+          raise ValueError(f'Specified irrep {irrep} not found')
         if vecs:
           d_unfuse = {0:(lidx,info[0])}
           if left:
@@ -758,10 +830,10 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       **kw_args):
     assert self.idxset == {0,1}
     kd = self.group.dual(irrep)
-    N = self._dspace[0].degen_of(kd)
+    N = self._dspace[0].degen_of(irrep)
     if not N:
       return None
-    idx = self._dspace[0].idx_of(kd)
+    idx = self._dspace[0].idx_of(irrep)
     d = self.group.dim(irrep)
     A = self.permuted((0,1))[idx:idx+d*N:d,idx:idx+d*N:d]
     if selection is not None:
@@ -935,12 +1007,12 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
       return self.group.Tensor(T, idxs, spaces)
     return self.group.ChargedTensor(T, idxs, spaces, irrep)
 
-  def matches(self, A, conj):
-    if not isinstance(A, self.group.ChargedTensor):
+  def matches(self, A, conj, strict=True):
+    if strict and not isinstance(A, self.group.ChargedTensor):
       raise ValueError('Failure to match symmetry group')
     Tensor.matches(self, A, conj)
-    if (not conj and self._irrep != A._irrep) or \
-        (conj and self._irrep != self.group.dual(A._irrep)):
+    if strict and ((not conj and self._irrep != A._irrep) or \
+        (conj and self._irrep != self.group.dual(A._irrep))):
       raise ValueError('Failure to match overall transformation')
 
   @classmethod
@@ -953,71 +1025,76 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     V = f[0].V
     kd = self.group.dual(self._irrep)
     d = self.group.dim(self._irrep)
-    if kd in V:
-      i0 = V.idx_of(kd)
-      n = V.degen_of(kd)
-      M._T[i0:i0+n*d:d] = tensors._np_rand((n,),**settings)
-    elif self.group.indicate(kd) < 0 and self._irrep in V:
-      # Need to charge-conjugate
-      # In this case self._irrep should be "primary"
-      # S^H*v will transform correctly
+    if self._irrep in V:
       i0 = V.idx_of(self._irrep)
-      n = V.idx_of(self._irrep)
-      S = self.group.S(kd)
+      n = V.degen_of(self._irrep)
+      M._T[i0:i0+n*d:d] = tensors._np_rand((n,),**settings)
+    elif self.group.indicate(kd) < 0 and kd in V:
+      # Need to charge-conjugate
+      # In this case self._irrep should be "secondary"
+      # S^H*v will transform correctly
+      i0 = V.idx_of(kd)
+      n = V.idx_of(kd)
+      S = self.group.S(self._irrep)
       v0 = np.kron(tensors._np_rand((n,),**settings),S[0,:].conj())
       M._T[i0:i0+n*d] = v0
     else:
-      raise ValueError('Tensor specified does not have %s sector'%kd)
+      raise ValueError('Tensor specified does not have %s sector'%self._irrep)
     self._T = M._do_unfuse({0:(self._idxs,f[0])})._T
 
   def _svd_fuse(self, left, right):
     """Fuse in implicit index"""
     fpl = self.group.Substantiation(left, self, irrep=self._irrep)
-    fpr = self.group.Fusion([~self._dspace[lr] for lr in right], right).conj()
+    fpr = self.group.Fusion([~self._dspace[lr] for lr in right], idx_in=right).conj()
     M, info = self._do_fuse((0,left), (1,right), prims={0:fpl,1:fpr})
     T0 = M._T.flatten()
-    subst = fpl.substantiating_fusion_matrix(fpr)
-    T1 = subst.dot(T0)
-    return self.group.InvariantTensor(T1.reshape((-1,M.shape[1])), (0,1),
-      (fpr._out_subst, fpr.V))
+    if self.group.dim(self._irrep) > 1:
+      subst = fpl.substantiating_fusion_matrix(fpr._out)
+      T1 = subst.dot(T0)
+      T1 = T1.reshape((-1,M.shape[1]))
+    else:
+      T1 = M._T
+    return self.group.Tensor(T1, (0,1), (fpl._out_subst, fpr.V)),info
 
   def substantiate(self, idx):
     """Convert into invariant tensor with explicit index 'idx'"""
     # TODO split & pass to _svd_fuse?
     assert idx not in self._idxs
-    d = self.group.dim(self._irrep)
-    kd = self.group.dual(self._irrep)
-    vnew = self.group.SumRep([(self._irrep,1)])
+    k0 = self._irrep
+    d = self.group.dim(k0)
+    kd = self.group.dual(k0)
+    vnew = self.group.SumRep([(kd,1)])
     if d == 1:
       T = np.expand_dims(self._T, self.rank)
       return self.group.Tensor(T,self._idxs+(idx,),self._spaces+(vnew,))
     M, f = self._do_fuse((0,self._idxs))
     MT = M._T
     Msub = np.zeros(MT.shape+(d,),dtype=config.FIELD)
-    if kd not in f[0].V:
-      assert self.group.indicate(kd) < 0 and self._irrep in f[0].V
-      kd = self._irrep
+    if k0 not in f[0].V:
+      assert self.group.indicate(k0) < 0 and kd in f[0].V
+      k0,kd = kd,k0
       vnew = vnew.dual()
-    i0 = f[0].V.idx_of(kd)
-    nk = f[0].V.degen_of(kd)
+    i0 = f[0].V.idx_of(k0)
+    nk = f[0].V.degen_of(k0)
     Mk = np.expand_dims(MT[i0:i0+nk*d:d],1)
     Msub[i0:i0+nk*d,:] = np.kron(Mk,np.identity(d,dtype=config.FIELD))
     Msub = self.group.Tensor(Msub,(0,1),M._spaces+(vnew,))
     return Msub._do_unfuse({0:(self._idxs,f[0]),1:idx})
 
   def symmetrized(self):
-    kd = self.group.dual(self._irrep)
-    d = self.group.dim(self._irrep)
-    if self.group.indicate(kd) == -2:
+    k0 = self._irrep
+    kd = self.group.dual(k0)
+    d = self.group.dim(k0)
+    if self.group.indicate(k0) == -2:
       fp = self.group.Fusion([~v for v in self._spaces], self._idxs).conj()
       M,f = self._do_fuse((0,self._idxs), prims={0:fp})
     else:
       M,f = self._do_fuse((0,self._idxs))
     Msym = M.zeros_like()
     V = f[0].V
-    if kd in V:
-      i0 = V.idx_of(kd)
-      n = V.degen_of(kd)
+    if k0 in V:
+      i0 = V.idx_of(k0)
+      n = V.degen_of(k0)
       Msym._T[i0:i0+n*d:d] = M._T[i0:i0+n*d:d]
     return Msym._do_unfuse({0:(self._idxs,f[0])})
 

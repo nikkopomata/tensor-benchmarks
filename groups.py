@@ -367,9 +367,11 @@ class O2(Group):
         yield (r2, np.expand_dims([[0,1],[-1,0]],(0,3)))
       return
     elif r2 == 0:
-      return [(r1, None)]
+      yield (r1, None)
+      return
     elif r2 == -1:
-      return [(r1, np.expand_dims([[0,1],[-1,0]],(1,3)))]
+      yield (r1, np.expand_dims([[0,1],[-1,0]],(1,3)))
+      return
     # 2Dx2D: first r = r1+r2
     yield (r1+r2, sqrthalf*np.expand_dims([[[1,0],[0,1]],[[0,1],[-1,0]]],3))
     # r1-r2
@@ -898,8 +900,11 @@ class ProductGroup(Group):
     # Associativity of product: H may be compound, G should be singular
     return self.G.product(self.H.product(H2))
 
-  def __getnewargs_ex__(self):
-    return (self.G, self.H), {'realforms':self._realforms}
+  def __reduce__(self):
+    return self.__class__, (self.G,self.H), {'_realforms':self._realforms}
+
+  #def __getnewargs_ex__(self):
+  #  return (self.G, self.H), {'realforms':self._realforms}
 
 
 class GroupDerivedType(ABCMeta):
@@ -1027,6 +1032,7 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
       if k1 == k:
         return i0
       i0 += n*self.group.dim(k1)
+    raise KeyError(f'representation does not contain irrep {k}')
 
   def degen_of(self, k):
     """Degeneracy of irrep in representation"""
@@ -1040,6 +1046,26 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
 
   def __reduce__(self):
     return self._reconstructor, (self._decomp,)
+
+  def trim(self, boolidx):
+    """Cut out indices indexed as in boolidx (only keep True values)"""
+    boolidx = boolidx.astype(bool)
+    decomp = []
+    idx0 = 0
+    for k,n in self._decomp:
+      d = self.group.dim(k)
+      idx1 = idx0 + d*n
+      ktrim = boolidx[idx0:idx1:d]
+      for i0 in range(1,d):
+        # Check degenerate indices have the same inclusion/exclusion
+        # TODO may not be checked immediately
+        assert all(ktrim == boolidx[idx0+i0:idx1:d])
+      # Total number of irrep copies <- True elements of ktrim
+      decomp.append((k,sum(ktrim)))
+      idx0 += d*n
+    assert idx0 == self.dim
+    return self.__class__(decomp)
+
 
 
 class DerivedTypeReconstructor:

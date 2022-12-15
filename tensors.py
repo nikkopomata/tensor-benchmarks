@@ -312,7 +312,7 @@ class Tensor:
     idxo = tuple(self._idxs.index(ll) for ll in order)
     return self._T.transpose(idxo)
 
-  def matches(self, A, conj):
+  def matches(self, A, conj, strict=True):
     """Verify that indices match
     conj indicates whether or not comparison is with dual spaces"""
     if set(self._idxs) != set(A._idxs):
@@ -407,7 +407,7 @@ class Tensor:
     return self._init_like(np.zeros_like(self._T))
 
   @classmethod
-  def zeros_from(cls, parsestr, *tensors):
+  def zeros_from(cls, parsestr, *tensors, **kw_args):
     """Construct zero tensor based on indices of tensors
     as identified by parsestr
     parsestr is of the form -
@@ -427,7 +427,7 @@ class Tensor:
     for i in range(len(tensstr)):
       istrs = tensstr[i].split(',')
       A = tensors[i]
-      if not isinstance(A,cls): # A is dimension of new space
+      if not isinstance(A,Tensor): # A is dimension of new space
         V = cls._vspace_from_arg(A)
         dims.extend(len(istrs)*[V.dim])
         for s in istrs:
@@ -465,7 +465,10 @@ class Tensor:
           else:
             vs.append(~V)
           dims.append(V.dim)
-    return cls(np.zeros(tuple(dims),dtype=config.FIELD), tuple(idxs), tuple(vs))
+    init_args = (tuple(idxs), tuple(vs))
+    if 'init_args' in kw_args:
+      init_args = init_args + kw_args['init_args']
+    return cls(np.zeros(tuple(dims),dtype=config.FIELD), *init_args)
 
   def zeros_fromT(self, parsestr, *tensors):
     """zeros_from, but with 'self' as first tensor argument"""
@@ -673,7 +676,7 @@ class Tensor:
     if view:
       return TensorTransposedView(self, idxmap)
     else:
-      return self.__class__(self._T, [idxmap[self._idxs[i]] \
+      return self._tensorfactory(self._T, [idxmap[self._idxs[i]] \
           for i in range(self.rank)], tuple(self._spaces))
 
   def transpose(self, parsestr, view=True, strict=False, c=False):
@@ -1142,7 +1145,7 @@ class Tensor:
       raise ValueError('Output index \'%s\' repeated'%l0)
     return self._do_contract(T2, contracted, out1, out2, conj)
 
-  def _do_contract(self, T2, contracted, out1, out2, conj):
+  def _do_contract(self, T2, contracted, out1, out2, conj, **tf_args):
     i1 = []
     i2 = []
     for l,r in contracted:
@@ -1177,7 +1180,7 @@ class Tensor:
       raise me
     if len(lout1)+len(lout2) == 0: # Scalar
       return T[()]
-    return self._tensorfactory(T, tuple(lout1+lout2), tuple(vout1+vout2))
+    return self._tensorfactory(T, tuple(lout1+lout2), tuple(vout1+vout2), **tf_args)
 
   def trace(self, parsestr=''):
     """Trace over identified indices

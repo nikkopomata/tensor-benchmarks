@@ -190,6 +190,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       raise ValueError('Can only find eigenvalues of endomorphism')
     if k >= self._fuse_out.effective_dim-1:
       k = self._fuse_out.effective_dim-2
+      assert k > 0
     if isinstance(guess, Tensor):
       self._fuse_in.matchtensor(guess)
       guess = self.vector_out(guess)
@@ -238,6 +239,14 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
         T += T1
     return T
 
+  def charge(self, irrep):
+    """Convert input & output to charged tensors transforming under irrep"""
+    fin = self._fuse_in.substantiating(irrep)
+    if self.is_endomorphic:
+      fout = fin
+    else:
+      fout = self._fuse_out.substantiating(irrep)
+    self._fuse_in,self._fuse_out = fin,fout
 
 class NetworkOperator(TensorOperator):
   """Abstract linear-operator wrapping for Network
