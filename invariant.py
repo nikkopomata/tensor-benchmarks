@@ -335,7 +335,7 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
         raise ValueError('second element of irrep pair must be valid '
           'degeneracy')
       if k in repset:
-        raise ValueError('irrep \'%s\' repeated'%k)
+        raise ValueError(f'irrep \'{k}\' repeated')
       elif cls.group.indicate(k) < 0 and cls.group.dual(k) in repset:
         raise ValueError('quaternionic \'%s\' double represented'%k)
       repset.add(k)
@@ -714,6 +714,12 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       Vk = np.kron(Vs[k][:n,:],np.identity(d))
       Vd[ic:ic+d*n,ir:ir+Vk.shape[1]] = Vk
       ic += d*n
+    if ic == 0:
+      # SVD returns 0: probably provided non-invariant tensor
+      if abs(self-self.symmetrized())/snorm > 1e-12:
+        raise ValueError('SVD failure: tensor passed does not transform properly')
+      else:
+        raise ValueError('SVD failure: dominant singular values not found (reason unclear)')
     U = self.__class__(U, (0,1), (VL,V_cl))
     Vd = self.__class__(Vd, (0,1), (V_cr,VR))
     if sv_tensor:
@@ -1136,7 +1142,8 @@ def invariant_of(group, T, idxs, sreps=None, irrep=None):
     except:
       raise ValueError('type provided cannot be converted to numpy.ndarray')
   idxs, matchdata = tensors.indexparse(idxs)
-  assert len(idxs) == T.ndim
+  if len(idxs) != T.ndim:
+    raise ValueError(f'array passed has {T.ndim} indices, expected {len(idxs)}')
   GRep = SumRepresentation.derive(group)
   Vs = []
   Vd = {}
@@ -1154,6 +1161,9 @@ def invariant_of(group, T, idxs, sreps=None, irrep=None):
         V = GRep(V)
     Vd[ll] = V
   Vs = tuple(Vd[ll] for ll in idxs)
+  Vshape = tuple(V.dim for V in Vs)
+  if Vshape != T.shape:
+    raise ValueError(f'representations passed have dimensions {Vshape}; compare array shape {T.shape}')
   if irrep and group.triv != irrep:
     GTensor = ChargedTensor.derive(group)
     return GTensor(T, idxs, Vs, irrep)
