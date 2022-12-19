@@ -586,10 +586,9 @@ class Tensor:
     assert r2 == len(idx1) and r2 == len(vs)
     return cls._identity(idx0,idx1,vs)
 
-  @classmethod
   def id_fromT(self, parsestr, *tensors):
     """id_from, but with 'self' for first tensor argument"""
-    return self__class__.id_from(parsestr, self, *tensors)
+    return self.__class__.id_from(parsestr, self, *tensors)
 
   def id_extend(self, parsestr, *tensors):
     """Extend self by multiplication with identity tensor based on indices
