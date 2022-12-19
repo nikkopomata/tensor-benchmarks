@@ -530,10 +530,10 @@ class MPO(MPOgeneric):
 
   def getboundarytransfleft(self, psi, lr='l'):
     T = LeftTransfer(psi, 0, lr, self)
-    T.setstrict()
     if lr == 'r':
       T0 = psi.getTR(0)
     else:
+      T.setstrict()
       T0 = psi.getTc(0)
     TV = self.getT(0).contract(T0,'t-b;r>c,b>b;r>t')
     TV = TV.contract(T0,'b-b;~;r>b*')
@@ -543,10 +543,10 @@ class MPO(MPOgeneric):
   def getboundarytransfright(self, psi, lr='r'):
     n = self.N-1
     T = RightTransfer(psi, n, lr, self)
-    T.setstrict()
     if lr == 'l':
       T0 = psi.getTL(n)
     else:
+      T.setstrict()
       T0 = psi.getTc(n)
     TV = self.getT(n).contract(T0,'t-b;l>c,b>b;l>t')
     TV = TV.contract(T0,'b-b;~;l>b*')
@@ -759,8 +759,8 @@ class MPO(MPOgeneric):
       psi0 = copy(psi)
     else:
       if isinstance(psi0,str):
-        print('loading from',savefile)
-        psi, sv = pickle.load(open(savefile,'rb'))
+        print('loading from',psi0)
+        psi0, sv = pickle.load(open(psi0,'rb'))
       elif not isinstance(psi0,MPS):
         psi0 = self.rand_MPS(bond=chi)
         psi0.restore_canonical(tol=tol0)

@@ -943,8 +943,8 @@ class iMPO(MPOgeneric):
       psi0 = copy(psi)
     else:
       if isinstance(psi0,str):
-        print('loading from',savefile)
-        psi, (ltransf,rtransf),sv = pickle.load(open(savefile,'rb'))
+        print('loading from',psi0)
+        psi0, (ltransf,rtransf),sv = pickle.load(open(psi0,'rb'))
       elif not isinstance(psi0,iMPS):
         psi0 = self.rand_MPS(bond=chi)
         psi0.restore_canonical(tol=tol0)
