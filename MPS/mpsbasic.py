@@ -141,6 +141,8 @@ class MPS(MPSgeneric):
       self._rightcanon[n] = True
     Ms[0] = U.contract(Ms[0],'l-r;~')
     self._leftcanon[0] = True
+    if config.verbose >= config.VDEBUG:
+      print('normalized to',self.normsq())
     return Ntot
 
   def printcanon(self,compare=False):
@@ -774,7 +776,8 @@ class MPO(MPOgeneric):
         print('loading from',psi0)
         psi0, sv = pickle.load(open(psi0,'rb'))
       elif not isinstance(psi0,MPS):
-        psi0 = self.rand_MPS(bond=chi)
+        bond = psi0 if psi0 else chi
+        psi0 = self.rand_MPS(bond=bond)
         psi0.restore_canonical(tol=tol0)
       psi = copy(psi0)
     E = 0
@@ -793,7 +796,7 @@ class MPO(MPOgeneric):
         Ldiff = psi.schmidtdiff(psi0)
         ip = abs(psi.dot(psi0)) # Don't take per-site fidelity?
         pdiff = 1-ip
-        print(f'[{niter}]\t{Ldiff:0.6g}\t{pdiff:10.6g}\tE={np.real(E0)+Eshift:0.10g}')
+        print(f'[{niter}]\t{Ldiff:0.6g}\t{pdiff:10.6g}\tE={np.real(E)+Eshift:0.10g}')
         if Ldiff < delta2[chi]:
           break
         psi0 = copy(psi)

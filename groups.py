@@ -143,7 +143,7 @@ class Group(metaclass=GroupType):
     """Retrieve dimension of irrep r"""
     if r not in self._dims:
       self.verify_rep(r)
-      self._dims[r] = self._fdim(r)
+      self._dims[r] = int(self._fdim(r))
     return self._dims[r]
 
   @abstractmethod

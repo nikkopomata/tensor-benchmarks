@@ -784,9 +784,16 @@ class MPOgeneric:
       M0 = psi.getTL(n).diag_mult('r',psi.getschmidt(n))
     Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'
       'L.c-O.l,O.r-R.c,O.t-T.b;L.b>l,R.b>r,O.b>b', TL.T,self.getT(n),TR.T)
-    if psi.charged_at(n):
-      Heff.charge(psi.irrep)
-    w,v = Heff.eigs(keig,which='SA',guess=M0)
+    if Heff.shape[0] <= keig+1:
+      Heff = Heff.asdense(inprefix='t',outprefix='')
+      if psi.charged_at(n):
+        w,v = Heff.eig('b-tb,l-tl,r-tr',irrep=psi.irrep)
+      else:
+        w,v = Heff.eig('b-tb,l-tl,r-tr')
+    else:
+      if psi.charged_at(n):
+        Heff.charge(psi.irrep)
+      w,v = Heff.eigs(keig,which='SA',guess=M0)
     v = v[np.argmin(w)]
     if config.verbose > config.VDEBUG:
       print('deviation',1-abs(M0.contract(v,'l-l,r-r,b-b*'))/abs(M0)/abs(v))

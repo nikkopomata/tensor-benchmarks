@@ -180,7 +180,7 @@ class Tensor:
 
   @property
   def numel(self):
-    return functools.reduce(int.__mul__, (vs.dim for vs in self._spaces))
+    return functools.reduce(int.__mul__, (int(vs.dim) for vs in self._spaces))
 
   @property
   def idxset(self):
@@ -1701,7 +1701,8 @@ class FusionPrimitive:
       if self._rank == 1:
         v_out = self._spaces_in[0]
       else:
-        d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
+        #d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
+        d = int(np.product([vi.dim for vi in self._spaces_in]))
         v_out = links.VSpace(d)
     self._out = v_out
 
