@@ -14,6 +14,28 @@ config.verbose = 1
 config.VDEBUG = 2
 keig = 5
 
+def chidependent(chis,*parameters):
+  """Convert optionally-chi-dependent parameters into dict
+  May be scalar, callable, list, or dict"""
+  # TODO move to general-purpose toolbox
+  # TODO use in methods other than MPO.do_dmrg
+  params = list(parameters)
+  for ip,p in enumerate(parameters):
+    if callable(p):
+      params[ip] = {c:p(c) for c in chis}
+    elif isinstance(p,list):
+      if len(p) < len(chis):
+        # Repeat final element
+        p.extend((len(chis)-len(p))*[p[-1]])
+      params[ip] = {c:p[ic] for ic,c in enumerate(chis)}
+    elif isinstance(p,dict):
+      # Convert in a way to raise KeyError here
+      params[ip] = {c:p[c] for c in chis}
+    else:
+      # "Scalar"
+      params[ip] = {c:p for c in chis}
+  return params
+
 # TODO randMPS prep, include invariant tensors
 
 def positive_contribution(As, tolerance):
@@ -805,7 +827,7 @@ class MPOgeneric:
       'L.b>l,R.b>r,Ol.b>bl,Or.b>br', TL.T,self.getT(n),self.getT(n+1),TR.T)
     if Heff.shape[0] <= keig+1:
       # TODO efficient dense calculation, perform eig in operators
-      Heff = Heff.asdense(inprefix='t',outprefix='',naive=True)
+      Heff = Heff.asdense(inprefix='t',outprefix='')
       #print(f'Heff ({n}-{n+1}): {Heff._irrep}',Heff.getspace('l')._decomp,Heff.getspace('r')._decomp,'charge?',psi.charged_at(n) or psi.charged_at(n+1))
       if psi.charged_at(n) or psi.charged_at(n+1):
         w,v = Heff.eig('bl-tbl,br-tbr,l-tl,r-tr',irrep=psi.irrep)

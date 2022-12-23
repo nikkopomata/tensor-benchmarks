@@ -528,44 +528,46 @@ class MPO(MPOgeneric):
     Ms.append(M)
     return MPO(Ms)
 
-  def getboundarytransfleft(self, psi, lr='l'):
+  def getboundarytransfleft(self, psi, lr='l', strict=True):
     T = LeftTransfer(psi, 0, lr, self)
     if lr == 'r':
       T0 = psi.getTR(0)
     else:
-      T.setstrict()
+      if strict:
+        T.setstrict()
       T0 = psi.getTc(0)
     TV = self.getT(0).contract(T0,'t-b;r>c,b>b;r>t')
     TV = TV.contract(T0,'b-b;~;r>b*')
     T.setvalue(TV)
     return T
   
-  def getboundarytransfright(self, psi, lr='r'):
+  def getboundarytransfright(self, psi, lr='r', strict=True):
     n = self.N-1
     T = RightTransfer(psi, n, lr, self)
     if lr == 'l':
       T0 = psi.getTL(n)
     else:
-      T.setstrict()
+      if strict:
+        T.setstrict()
       T0 = psi.getTc(n)
     TV = self.getT(n).contract(T0,'t-b;l>c,b>b;l>t')
     TV = TV.contract(T0,'b-b;~;l>b*')
     T.setvalue(TV)
     return T
 
-  def right_transfer(self, psi, n, collect=False):
+  def right_transfer(self, psi, n, collect=False, strict=True):
     # Transfer matrix of expectation with psi from site n on (inclusive)
-    rts = self.getboundarytransfright(psi).moveby(self.N-1-n,collect=collect)
+    rts = self.getboundarytransfright(psi,strict=strict).moveby(self.N-1-n,collect=collect)
     if collect:
       rts = rts[::-1]
     return rts
 
   def left_transfer(self, psi, n, collect=False):
     # Transfer matrix of expectation with psi from site n on (inclusive)
-    return self.getboundarytransfleft(psi).moveby(n,collect=collect)
+    return self.getboundarytransfleft(psi,strict=strict).moveby(n,collect=collect)
 
-  def expv(self, psi):
-    T = self.right_transfer(psi, 1)
+  def expv(self, psi, strict=False):
+    T = self.right_transfer(psi, 1, strict=strict)
     return T.left(terminal=True)
 
   def DMRG_opt_single_left(self, psi, TR, tol=None):
@@ -603,7 +605,7 @@ class MPO(MPOgeneric):
     # Get leading eigenvector (smallest `algebraic' part, start w/current)
     if Heff.shape[0] <= keig+1:
       # TODO efficient dense calculation, perform eig in operators
-      Heff = Heff.asdense(inprefix='t',outprefix='',naive=True)
+      Heff = Heff.asdense(inprefix='t',outprefix='')
       w,v = Heff.eig('bl-tbl,br-tbr,r-tr')
     else:
       w,v = Heff.eigs(keig,which='SA',guess=M0)
@@ -626,7 +628,7 @@ class MPO(MPOgeneric):
     # Get leading eigenvector
     if Heff.shape[0] <= keig+1:
       # TODO efficient dense calculation, perform eig in operators
-      Heff = Heff.asdense(inprefix='t',outprefix='',naive=True)
+      Heff = Heff.asdense(inprefix='t',outprefix='')
       w,v = Heff.eig('bl-tbl,br-tbr,l-tl')
     else:
       w,v = Heff.eigs(keig,which='SA',guess=M0)
@@ -720,18 +722,28 @@ class MPO(MPOgeneric):
     # Use tol for error threshold in chi^2 truncations (two-site update),
     # tol1 for error threshold in chi^1 svd (one-site update + canonical form)
     # tol0 is threshold for initialization
+    # Optional: parameters nsweep, nsweep2, Edelta, delta2, ncanon, ncanon2,
+    #   tol, tol1 may be made chi-dependent by passing a callable, list, or dict
     if isinstance(chi,list):
       chis,chi = chi,chi[0]
     else:
       chis = [chi]
+    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1)
+    # TODO allow adjustment of nsweeps, deltas based on chi
     ic0 = 0
-    sd = 2
     sweep = 0
     if savefile and cont and os.path.isfile(savefile):
       print('reloading from',savefile)
       psi, sv = pickle.load(open(savefile,'rb'))
       if isinstance(sv, tuple):
         chi, sd, sweep = sv
+        print(f'Start at: chi={chi}, {sd}x, sweep #{sweep}')
+        if sd == 1:
+          # Skip double
+          nsweep2[chi] = 0
+          nsweep[chi] -= sweep
+        else:
+          nsweep2[chi] -= sweep
         ic0 = chis.index(chi)
       else:
         ic0 = -1
@@ -766,46 +778,46 @@ class MPO(MPOgeneric):
         psi0.restore_canonical(tol=tol0)
       psi = copy(psi0)
     E = 0
-    for ic,chi in enumerate(chis):
+    for ic,chi in enumerate(chis[ic0:]):
       print(f'{chi=:>3} (#{ic})')
-      for niter in range(nsweep2):
+      for niter in range(nsweep2[chi]):
         # Perform two-site DMRG
         E0 = E
-        TRs = self.DMRGsweep_double(psi,chi,tol=tol)
+        TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi])
         E = TRs[0].left().left(terminal=True)
-        if config.verbose or (niter%ncanon2 == 0):
+        if config.verbose or (niter%ncanon2[chi] == 0):
           print(f'    \t{np.real(E-E0)}')
         #if (niter+1)%ncanon2 == 0: #TODO
-        psi.restore_canonical(almost_canon=True,tol=tol1)
+        psi.restore_canonical(almost_canon=True,tol=tol1[chi])
         # Difference in Schmidt indices
         Ldiff = psi.schmidtdiff(psi0)
         ip = abs(psi.dot(psi0)) # Don't take per-site fidelity?
         pdiff = 1-ip
         print(f'[{niter}]\t{Ldiff:0.6g}\t{pdiff:10.6g}\tE={np.real(E0)+Eshift:0.10g}')
-        if Ldiff < delta2:
+        if Ldiff < delta2[chi]:
           break
         psi0 = copy(psi)
         if savefile:
           pickle.dump((psi,(chi,2,niter)),open(savefile,'wb'))
-      for niter in range(nsweep):
+      for niter in range(nsweep[chi]):
         E0 = E
-        if niter % ncanon == 0:
-          psi.restore_canonical(almost_canon=True,tol=tol1)
+        if niter % ncanon[chi] == 0:
+          psi.restore_canonical(almost_canon=True,tol=tol1[chi])
           # TODO gauge transfers instead?
           TRs = self.right_transfer(psi, 1, collect=True)
         TRs = self.DMRGsweep_single(psi, TRs)
         E = np.real(TRs[0].left(terminal=True))
         if config.verbose >= config.VDEBUG:
           print(f'[{niter}] (E={E+Eshift:0.3f}, norm {np.real(psi.normsq()):0.3f})=>{np.real(E/psi.normsq())} or {np.real(self.expv(psi)/psi.normsq())}')
-        elif config.verbose or (niter%ncanon == 0):
+        elif config.verbose or (niter%ncanon[chi] == 0):
           print(f'[{niter}] E={np.real(E+Eshift):0.8f} ({np.real(E0-E):+0.4g})')
-        if abs(E0-E)<Edelta:
+        if abs(E0-E)<Edelta[chi]:
           break
         if savefile:
           pickle.dump((psi,(chi,1,niter)),open(savefile,'wb'))
       Efin = np.real(E)
       # Restore canonical form
-      psi.restore_canonical(tol=tol1,almost_canon=True)
+      psi.restore_canonical(tol=tol1[chi],almost_canon=True)
       if config.verbose >= config.VDEBUG:
         psi.printcanon(compare=True)
       if saveprefix:
@@ -850,6 +862,6 @@ class MPSirrep(MPS):
       if n != self._site and self._matrices[n]._irrep != e:
         print(f'matrix at {n} transforms under {self._matrices[n]._irrep} instead of trivial {e} expected')
     n = self._site
-    if self._matrices[n] != self._irrep:
+    if self._matrices[n]._irrep != self._irrep:
       print(f'charged matrix at {n} transforms under {self._matrices[n]._irrep} instead of expected (non-trivial) {self._irrep}')
     super().printcanon(compare)

@@ -75,6 +75,48 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     """Convert output Tensor to vector"""
     return self._fuse_in.vector_convert(T)
 
+  def connect_with(self, O2, which='both', switch=False, c=False):
+    """Change fuse_in or fuse_out to match O2
+    which (in, out, or both) identifies which to change
+    if switch, identify with opposite
+    if c, identify with conjugate
+    O2 may optionally be a FusionPrimitive instead"""
+    # TODO is there actually a use case for this?
+    if which == 'both':
+      matchin,matchout = True,True
+    elif which == 'in':
+      matchin,matchout = True,False
+    else:
+      assert which == 'out'
+      matchin,matchout = False,True
+    if not isinstance(O2,TensorOperator):
+      assert isinstance(O2, FusionPrimitive)
+      assert which != 'both'
+      if matchin:
+        fin = O2
+      else:
+        fout = O2
+    else:
+      fin,fout = self._fuse_in,self._fuse_out
+      if switch:
+        fin,fout = fout,fin
+    if matchin:
+      assert self._fuse_in.cmp(fin, c=c)
+      if c:
+        fin = fin.conj()
+      self._fuse_in = fin
+    if matchout:
+      assert self._fuse_out.cmp(fout, c=c)
+      if c:
+        fout = fout.conj()
+      self._fuse_out = fout
+
+  def toendomorphism(self):
+    """Change fuse_out to match fuse_out"""
+    if not self._fuse_in.cmp(self._fuse_out):
+      raise ValueError('Input & output indices not compatible')
+    self._fuse_out = self._fuse_in
+
   @property
   def dtype(self):
     return np.dtype(config.FIELD)
@@ -218,6 +260,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       return w, Ts
 
   def asdense(self, inprefix='', outprefix='', naive=False):
+    # TODO check asdense cases
     assert naive
     shape_in = self._fuse_in.shape
     shape_out = self._fuse_out.shape
@@ -399,6 +442,19 @@ class NetworkOperator(TensorOperator):
   def adjoint(self):
     return AdjointOperator(self)
 
+  def asdense(self, inprefix='', outprefix='', naive=False, order=None):
+    if naive:
+      return TensorOperator.asdense(self, inprefix, outprefix, naive)
+    out = {(t,ll):outprefix+lo for (t,ll),lo in self.network._out.items()}
+    t0bonds = self.network._tbonds[self._t0]
+    out.update({tl:inprefix+ll for ll,tl in t0bonds.items()})
+    net = self.network.subnetwork([self._t0], out)
+    if order is None:
+      net.optimize()
+    else:
+      net.setorder(order)
+    return net.contract()
+    
 
 class AdjointOperator(TensorOperator):
   def __init__(self, base):
@@ -420,6 +476,9 @@ class AdjointOperator(TensorOperator):
 
   def adjoint(self):
     return self._base_operator
+
+  def asdense(self, inprefix='', outprefix='', **kwargs):
+    return self._base_operator.asdense(inprefix=outprefix, outprefix=inprefix, **kwargs).conj()
 
 
 class TransposedOperator(TensorOperator):
@@ -448,6 +507,9 @@ class TransposedOperator(TensorOperator):
   def conj(self):
     return self._base_operator.adjoint()
 
+  def asdense(self, inprefix='', outprefix='', **kwargs):
+    return self._base_operator.asdense(inprefix=outprefix, outprefix=inprefix, **kwargs)
+
 
 class ConjugatedOperator(TensorOperator):
   def __init__(self, base):
@@ -474,6 +536,9 @@ class ConjugatedOperator(TensorOperator):
 
   def conj(self):
     return self._base_operator
+
+  def asdense(self, **kwargs):
+    return self._base_operator.asdense(**kwargs).conj()
 
 
 class ScaledOperator(TensorOperator):
@@ -504,6 +569,9 @@ class ScaledOperator(TensorOperator):
     return ScaledOperator(self._base_operator.conj(),
       np.conjugate(self._coefficient))
 
+  def asdense(self, **kwargs):
+    return self._coefficient * self._base_operator.asdense(**kwargs)
+
 
 class SumOperator(TensorOperator):
   def __init__(self, base1, base2, *additional_bases):
@@ -521,12 +589,13 @@ class SumOperator(TensorOperator):
       bo2 = base2._base_ops
     else:
       bo2 = (base2,)
-    self._base_ops = bo1+bo2
     for base in additional_bases:
       if not base1._fuse_in.cmp(base._fuse_in) or \
           not base1._fuse_out.cmp(base._fuse_out):
         raise ValueError('Operators are not summable')
       bo2 += (base,)
+    self._base_ops = bo1+bo2
+    # TODO check case of more than two summands
 
   def tensor_action(self, T):
     action = self._base_ops[0].tensor_action(T)
@@ -550,6 +619,12 @@ class SumOperator(TensorOperator):
 
   def conj(self):
     return SumOperator(*(op.conj() for op in self._base_ops))
+
+  def asdense(self, **kwargs):
+    T = self._base_ops[0].asdense(**kwargs)
+    for op in self._base_ops[1:]:
+      T += op.asdense(**kwargs)
+    return T
 
 
 class ProductOperator(TensorOperator):
@@ -588,6 +663,18 @@ class ProductOperator(TensorOperator):
   def conj(self):
     return ProductOperator(self._op_left.conj(), self._op_right.conj())
 
+  def asdense(self, inprefix='', outprefix='', naive=False):
+    if naive:
+      return TensorOperator.asdense(self, inprefix=inprefix, outprefix=outprefix, naive=True)
+    Tleft = self._op_left.asdense(inprefix=inprefix, outprefix=outprefix) 
+    Tright = self._op_right.asdense(inprefix=inprefix, outprefix=outprefix) 
+    contracted = [(inprefix+ll,outprefix+ll) for ll in self._op_left.idx_in]
+    outl = (outprefix+ll for ll in self.idx_out)
+    outl = {ol:ol for ol in outl}
+    outr = (inprefix+ll for ll in self.idx_in)
+    outr = {ir:ir for ir in outr}
+    return Tleft._do_contract(Tright, contracted, outl, outr, False)
+
 
 class IdentityOperator(TensorOperator):
   def __init__(self, base):
@@ -618,3 +705,10 @@ class IdentityOperator(TensorOperator):
 
   def conj(self):
     return self.transpose()
+
+  def asdense(self, inprefix='', outprefix='', **kwargs):
+    inidx = [inprefix+ll for ll in self.idx_in]
+    outidx = [outprefix+ll for ll in self.idx_out]
+    assert len(set(inidx) | set(outidx)) == 2*len(inidx)
+    return self._fuse_in.tensorclass._identity(outidx, inidx,
+      self._fuse_in._spaces_in)

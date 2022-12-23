@@ -706,6 +706,7 @@ class Network:
       out='reuse': original output names are used
       out='env': environment mode - name of contracted index
       out='auto' (or ~ flag): index name is kept as-is"""
+    # TODO additional out argument for environment bonds?
     if isinstance(minus, str):
       if not re.fullmatch(r'\w+(,\w+)*(;(\w+\.\w+\>\w+(,|$|\~$))+\~?(?<!,))?'
           ,minus):
@@ -731,7 +732,6 @@ class Network:
         elif not isinstance(out,dict):
           raise ValueError('out must be dictionary or valid mode')
         auto = False
-
       mo = minus.split(';')
       if len(mo) == 2:
         minus,outstr = mo
@@ -741,6 +741,8 @@ class Network:
       else:
         minus = mo[0]
       minus = minus.split(',')
+    else:
+      mode = None
     for t in minus:
       if t not in self._tdict:
         raise KeyError('Node %s missing'%t)
@@ -978,8 +980,22 @@ class Network:
     except OptimizationOverflow:
       raise ValueError('Network optimization could not be found within memory'
         ' limit %0.2fGiB'%(np.dtype(config.FIELD).itemsize*memcap/2**30))
-    self.memexpense(tree,reorder=True)
+    mem = self.memexpense(tree,reorder=True)
     self._tree = tree
+    if config.opt_verbose >= 1:
+      print(f'Optimized with {exp:.0e} steps, memory',end=' ')
+      memk = mem/2**14
+      if memk < 1000:
+        print(f'{round(memk):d}KB')
+      else:
+        memm = memk/2**10
+        if memm < 1000:
+          print(f'{memm:0.1f}MB')
+        elif memm < 2**20:
+          print(f'{memm/2**10:0.1f}GB')
+        else:
+          print(f'{memm/2**20:0.1f}TB (!!!)')
+      tree.pprint()
     
   def __optimize_child_simple(self, tlist, bonddim, resdict, expmin):
     assert isinstance(tlist,tuple)
