@@ -605,7 +605,8 @@ class MPO(MPOgeneric):
       'Or.r-R.c,Ol.t-T.bl,Or.t-T.br;R.b>r,Ol.b>bl,Or.b>br',
       self.getT(0),self.getT(1),TR.T)
     # Get leading eigenvector (smallest `algebraic' part, start w/current)
-    if Heff.shape[0] <= keig+1:
+    #if Heff.shape[0] <= keig+1: # TODO remove
+    if False:
       # TODO efficient dense calculation, perform eig in operators
       Heff = Heff.asdense(inprefix='t',outprefix='')
       w,v = Heff.eig('bl-tbl,br-tbr,r-tr')
@@ -628,7 +629,8 @@ class MPO(MPOgeneric):
       'Ol.r-Or.l,Ol.t-T.bl,Or.t-T.br;L.b>l,Ol.b>bl,Or.b>br',
       TL.T,self.getT(n),self.getT(n+1))
     # Get leading eigenvector
-    if Heff.shape[0] <= keig+1:
+    #if Heff.shape[0] <= keig+1: #TODO remove
+    if False:
       # TODO efficient dense calculation, perform eig in operators
       Heff = Heff.asdense(inprefix='t',outprefix='')
       w,v = Heff.eig('bl-tbl,br-tbr,l-tl')
@@ -730,7 +732,7 @@ class MPO(MPOgeneric):
       chis,chi = chi,chi[0]
     else:
       chis = [chi]
-    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1)
+    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,0,0)
     # TODO allow adjustment of nsweeps, deltas based on chi
     ic0 = 0
     sweep = 0
@@ -743,9 +745,10 @@ class MPO(MPOgeneric):
         if sd == 1:
           # Skip double
           nsweep2[chi] = 0
-          nsweep[chi] -= sweep
+          i1[chi] = sweep
+          TRs = self.right_transfer(psi, 1, collect=True)
         else:
-          nsweep2[chi] -= sweep
+          i2[chi] = sweep
         ic0 = chis.index(chi)
       else:
         ic0 = -1
@@ -780,10 +783,10 @@ class MPO(MPOgeneric):
         psi0 = self.rand_MPS(bond=bond)
         psi0.restore_canonical(tol=tol0)
       psi = copy(psi0)
-    E = 0
+    E = self.expv(psi)
     for ic,chi in enumerate(chis[ic0:]):
       print(f'{chi=:>3} (#{ic})')
-      for niter in range(nsweep2[chi]):
+      for niter in range(i2[chi],nsweep2[chi]):
         # Perform two-site DMRG
         E0 = E
         TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi])
@@ -798,11 +801,13 @@ class MPO(MPOgeneric):
         pdiff = 1-ip
         print(f'[{niter}]\t{Ldiff:0.6g}\t{pdiff:10.6g}\tE={np.real(E)+Eshift:0.10g}')
         if Ldiff < delta2[chi]:
+          if savefile:
+            pickle.dump((psi,(chi,1,0)),open(savefile,'wb'))
           break
         psi0 = copy(psi)
         if savefile:
-          pickle.dump((psi,(chi,2,niter)),open(savefile,'wb'))
-      for niter in range(nsweep[chi]):
+          pickle.dump((psi,(chi,2,niter+1)),open(savefile,'wb'))
+      for niter in range(i1[chi],nsweep[chi]):
         E0 = E
         if niter % ncanon[chi] == 0:
           psi.restore_canonical(almost_canon=True,tol=tol1[chi])
@@ -815,9 +820,11 @@ class MPO(MPOgeneric):
         elif config.verbose or (niter%ncanon[chi] == 0):
           print(f'[{niter}] E={np.real(E+Eshift):0.8f} ({np.real(E0-E):+0.4g})')
         if abs(E0-E)<Edelta[chi]:
+          if savefile and ic < len(chi)-1:
+            pickle.dump((psi,(chi[ic+1],2,0)),open(savefile,'wb'))
           break
         if savefile:
-          pickle.dump((psi,(chi,1,niter)),open(savefile,'wb'))
+          pickle.dump((psi,(chi,1,niter+1)),open(savefile,'wb'))
       Efin = np.real(E)
       # Restore canonical form
       psi.restore_canonical(tol=tol1[chi],almost_canon=True)

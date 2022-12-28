@@ -2,7 +2,7 @@ import numpy as np
 import re
 from scipy import sparse,linalg
 import scipy.sparse.linalg
-from .tensors import Tensor,FusionPrimitive
+from .tensors import Tensor,FusionPrimitive,_eig_vec_process
 
 from . import links, config, networks
 from copy import copy,deepcopy
@@ -231,22 +231,37 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     if not self.is_endomorphic:
       raise ValueError('Can only find eigenvalues of endomorphism')
     if k >= self._fuse_out.effective_dim-1:
-      k = self._fuse_out.effective_dim-2
-      assert k > 0
-    if isinstance(guess, Tensor):
-      self._fuse_in.matchtensor(guess)
-      guess = self.vector_out(guess)
-    elif guess:
-      raise TypeError('guess, if provided, must be Tensor')
-    self.iters = 0
-    if herm:
-      rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
-        v0=guess,**eigs_kw)
+      # Vector space is small; construct explicitly
+      try:
+        M = self.compute_dense_matrix()
+      except:
+        if self._fuse_out.effective_dim == 0:
+          raise ValueError('Linear operator is 0-dimensional')
+        else:
+          raise
+      if vecs:
+        rv = _eig_vec_process(M, herm, False, None, False, None)
+        rv = rv[:2]
+      elif herm:
+        return linalg.eigvalsh(M)
+      else:
+        return linalg.eigvals(M)
     else:
-      rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
-        v0=guess,**eigs_kw)
-    if not vecs:
-      return rv
+      # Do the actual sparse computation
+      if isinstance(guess, Tensor):
+        self._fuse_in.matchtensor(guess)
+        guess = self.vector_out(guess)
+      elif guess:
+        raise TypeError('guess, if provided, must be Tensor')
+      self.iters = 0
+      if herm:
+        rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
+          v0=guess,**eigs_kw)
+      else:
+        rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
+          v0=guess,**eigs_kw)
+      if not vecs:
+        return rv
     w, vs = rv
     nn = len(w)
     if mat:
@@ -282,14 +297,32 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
         T += T1
     return T
 
-  def charge(self, irrep):
-    """Convert input & output to charged tensors transforming under irrep"""
+  def charge(self, irrep, flip_quaternionic=False):
+    """Convert input & output to charged tensors transforming under irrep
+    If flip_quaternionic and irrep is a quaternionic rep whose dual is found in
+      either fused indices, will use dual instead for that case"""
+    G = self._fuse_in.group
+    if irrep not in self._fuse_in._out:
+      if flip_quaternionic and G.indicate(irrep)<0 and G.dual(irrep) in self._fuse_in._out:
+        irrep = G.dual(irrep)
+      else:
+        raise ValueError(f'input cannot transform under {irrep}')
     fin = self._fuse_in.substantiating(irrep)
     if self.is_endomorphic:
       fout = fin
     else:
+      if irrep not in self._fuse_out._out:
+        if flip_quaternionic and G.indicate(irrep)<0 and G.dual(irrep) in self._fuse_out._out:
+          irrep = G.dual(irrep)
+        else:
+          raise ValueError(f'output cannot transform under {irrep}')
       fout = self._fuse_out.substantiating(irrep)
     self._fuse_in,self._fuse_out = fin,fout
+
+  def compute_dense_matrix(self):
+    self.iters = 0
+    return self.matmat(np.identity(self._fuse_in.effective_dim,dtype=config.FIELD))
+
 
 class NetworkOperator(TensorOperator):
   """Abstract linear-operator wrapping for Network

@@ -10,8 +10,6 @@ from collections import defaultdict
 import os.path, pickle,sys
 import traceback
 
-config.verbose = 1
-config.VDEBUG = 2
 keig = 5
 
 def chidependent(chis,*parameters):
@@ -773,6 +771,8 @@ class MPOgeneric:
   def DMRG_opt_single(self, psi, n, TL, TR, right, gL=None, gR=None, tol=None):
     assert (TL.site - (n-1))%self.N == 0
     assert (TR.site - (n+1))%self.N == 0
+    if config.verbose > 1:
+      print('Optimizing site',n%self.N)
     if gL is not None and gR is None:
       M0 = psi.getTR(n).mat_mult('l-r',gL).diag_mult('l',psi.getschmidt(n-1))
     elif gL is None and gR is not None:
@@ -784,7 +784,8 @@ class MPOgeneric:
       M0 = psi.getTL(n).diag_mult('r',psi.getschmidt(n))
     Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'
       'L.c-O.l,O.r-R.c,O.t-T.b;L.b>l,R.b>r,O.b>b', TL.T,self.getT(n),TR.T)
-    if Heff.shape[0] <= keig+1:
+    #if Heff.shape[0] <= keig+1: #TODO remove
+    if False:
       Heff = Heff.asdense(inprefix='t',outprefix='')
       if psi.charged_at(n):
         w,v = Heff.eig('b-tb,l-tl,r-tr',irrep=psi.irrep)
@@ -818,6 +819,8 @@ class MPOgeneric:
     # Incorporate Schmidt coefficients on either side
     assert (TL.site - (n-1))%self.N == 0
     assert (TR.site - (n+2))%self.N == 0
+    if config.verbose > 1:
+      print(f'Optimizing sites {n%self.N}-{(n+1)%self.N}')
     if (Ulr is None) or right:
       ML = psi.getTL(n)
     else:
@@ -832,7 +835,8 @@ class MPOgeneric:
     Heff = operators.NetworkOperator('L;(T);Ol;Or;R;L.t-T.l,R.t-T.r,'
       'L.c-Ol.l,Ol.r-Or.l,Or.r-R.c,Ol.t-T.bl,Or.t-T.br;'
       'L.b>l,R.b>r,Ol.b>bl,Or.b>br', TL.T,self.getT(n),self.getT(n+1),TR.T)
-    if Heff.shape[0] <= keig+1:
+    #if Heff.shape[0] <= keig+1: #TODO remove
+    if False:
       # TODO efficient dense calculation, perform eig in operators
       Heff = Heff.asdense(inprefix='t',outprefix='')
       #print(f'Heff ({n}-{n+1}): {Heff._irrep}',Heff.getspace('l')._decomp,Heff.getspace('r')._decomp,'charge?',psi.charged_at(n) or psi.charged_at(n+1))

@@ -181,13 +181,18 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
   def vector_convert(self, T, idx=None):
     # Select invariant subspace
     v = super().vector_convert(T,idx)
-    return v[self.irrep_idx:self.irrep_idx+self.effective_dim]
+    return v[self.vector_slice]
+
+  @property
+  def vector_slice(self):
+    """Slice indexing nonzero elements in a vector in output space"""
+    return slice(self.irrep_idx,self.irrep_idx+self.effective_dim)
 
   def tensor_convert(self, v, idx=None):
     if idx is None:
       idx = self._idxs
     v1 = np.zeros((self._out.dim,),dtype=config.FIELD)
-    v1[self.irrep_idx:self.irrep_idx+self.effective_dim] = np.squeeze(v)
+    v1[self.vector_slice] = np.squeeze(v)
     V = self.asflattensor(v1)
     return V._do_unfuse({0:(idx,self)})
 
@@ -199,10 +204,12 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
     ax_old = ax_old%len(shape)
     shape[ax_old] = self.dim
     T1 = np.zeros(tuple(shape),config.FIELD)
-    sl = slice(self.irrep_idx,self.irrep_idx+self.effective_dim)
-    sls = (len(shape)-1)*[slice(None)]
-    sls.insert(ax_old,sl)
-    T1[tuple(sls)] = T
+    i0 = self.irrep_idx
+    d = self.group.dim(self._irrep)
+    n = self.effective_dim
+    sls = (len(shape)-1)*(slice(None),)
+    sls = sls[:ax_old] + (self.vector_slice,) + sls[ax_old:]
+    T1[sls] = T
     return super().tensor_convert_multiaxis(T1, idx_newax, ax_old, **kw_args)
 
   @property
@@ -270,6 +277,37 @@ class SubstantiatingFusion(InvariantFusion):
     mat = self._CG_subst.dot(CGk.dot(idblocks.dot(CG)))
     return mat
 
+  def substantiate2d(self, M, V2):
+    """Take a matrix (which transforms under irrep given vector-space
+    transformations given by self._out and V2)
+    transform to invariant matrix transforming with self._out_subst and V2
+    """
+    d = self.group.dim(self._irrep)
+    if d == 1:
+      # No need to flatten array
+      return self._CG_subst.dot(M)
+    # Flatten & fuse; conjugate fusion if necessary
+    if self.group.indicate(self._irrep) == -2:
+      fd,CGd = self.CG_matrix(self._out.dual(),V2.dual())
+      f,CG = fd.dual(),CGd.conj()
+    else:
+      f,CG = self.CG_matrix(self._out,V2)
+    if self._irrep not in f:
+      raise ValueError('Cannot substantiate index (no possible nontrivial value)')
+    idx0 = f.idx_of(self._irrep)
+    n = f.degen_of(self._irrep)
+    idx1 = idx0+n*d
+    CG_reduce = CG[idx0:idx0+n*d:d,:]
+    Mreduced = CG_reduce.dot(M.flatten())
+    D0,D1 = self._out.dim,V2.dim
+    Mexpand = np.zeros((D0,d,D1),dtype=config.FIELD)
+    Mexpand[:,0,:] = M
+    for i in range(1,d):
+      expandi = CG[idx0+i:idx1:d,:].getH().dot(Mreduced)
+      Mexpand[:,i,:] = expandi.reshape((D0,D1))
+    Mfuse = self._CG_subst.dot(Mexpand.reshape((D0*d,D1)))
+    return Mfuse
+
   def conj(self):
     if self._CGmat is None:
       CG = None
@@ -280,6 +318,11 @@ class SubstantiatingFusion(InvariantFusion):
     return self.__class__([~v for v in self._spaces_in],~self._out,self._idxs,
         CG=CG,irrep=self.group.dual(self._irrep),
         subst_info=(~self._out_subst,CGsubst))
+
+  @property
+  def vector_slice(self):
+    i0,n,d = self.irrep_idx,self.effective_dim,self.group.dim(self._irrep)
+    return slice(i0,i0+d*n,d)
 
   def asflattensor(self, v1):
     return self.group.ChargedTensor(v1,(0,),(self._out,),self._irrep)
@@ -403,8 +446,9 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       shape = T.shape
       T = np.moveaxis(T,idx,0)
       T = T.reshape((shape[idx],-1))
-      T = sfuse._CG_subst.transpose().conj().dot(T)
-      T = T.reshape((shape[idx],d,-1))[:,0,:]
+      #T = sfuse._CG_subst.getH().dot(T)
+      #T = T.reshape((shape[idx],d,-1))[:,0,:]
+      T = sfuse._CG_subst[:,::d].getH().dot(T)
       T = np.moveaxis(T,0,idx).reshape(shape[:idx]+(shape[idx]//d,)+shape[idx+1:])
     else:
       irrep = None
@@ -507,8 +551,14 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       if isinstance(T2, ChargedTensor):
         # Both are charged - must be dual
         if not (conj and T2._irrep == self._irrep) and not (not conj and T2._irrep == self.group.dual(self._irrep)):
-          raise NotImplementedError('Contraction of non-dual charged tensors not yet'
-          ' implemented')
+          raise NotImplementedError('Contraction of non-dual charged tensors'
+            ' not yet implemented')
+        if self.group.dim(self._irrep) != 1:
+          # TODO more efficient contraction of higher-rank tensors?
+          contracted.append(('.','.'))
+          return Tensor._do_contract(self.substantiate('.'),
+                          T2.substantiate('.'), contracted, out1, out2, conj,
+                          irrep=self.group.triv)
         irrep = self.group.triv
     else:
       if conj:
@@ -1055,18 +1105,15 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     fpl = self.group.Substantiation(left, self, irrep=self._irrep)
     fpr = self.group.Fusion([~self._dspace[lr] for lr in right], idx_in=right).conj()
     M, info = self._do_fuse((0,left), (1,right), prims={0:fpl,1:fpr})
-    T0 = M._T.flatten()
-    if self.group.dim(self._irrep) > 1:
-      subst = fpl.substantiating_fusion_matrix(fpr._out)
-      T1 = subst.dot(T0)
-      T1 = T1.reshape((-1,M.shape[1]))
-    else:
-      T1 = M._T
-    return self.group.Tensor(T1, (0,1), (fpl._out_subst, fpr.V)),info
+    Msub = fpl.substantiate2d(M.permuted((0,1)), fpr.V)
+    Tfuse = self.group.Tensor(Msub, (0,1), (fpl._out_subst, fpr.V))
+    return Tfuse, info
 
   def substantiate(self, idx):
     """Convert into invariant tensor with explicit index 'idx'"""
     # TODO split & pass to _svd_fuse?
+    if self.group.indicate(self._irrep) == -2:
+      return self.conj().substantiate(idx).conj()
     assert idx not in self._idxs
     k0 = self._irrep
     d = self.group.dim(k0)
@@ -1087,7 +1134,9 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     Mk = np.expand_dims(MT[i0:i0+nk*d:d],1)
     Msub[i0:i0+nk*d,:] = np.kron(Mk,np.identity(d,dtype=config.FIELD))
     Msub = self.group.Tensor(Msub,(0,1),M._spaces+(vnew,))
-    return Msub._do_unfuse({0:(self._idxs,f[0]),1:idx})
+    #return Msub._do_unfuse({0:(self._idxs,f[0]),1:idx})
+    Tsub = Msub._do_unfuse({0:(self._idxs,f[0]),1:idx})
+    return Tsub
 
   def symmetrized(self):
     k0 = self._irrep

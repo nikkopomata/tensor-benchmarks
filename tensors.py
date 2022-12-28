@@ -303,6 +303,8 @@ class Tensor:
 
   def permuted(self, order):
     """Return tensor permuted according to order"""
+    if isinstance(order,str):
+      order = order.split(',')
     if set(self._idxs) != set(order):
       ll = list(set(self._idxs) ^ set(order))[0]
       if ll in self._idxs:

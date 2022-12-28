@@ -796,11 +796,18 @@ class Network:
       auto = ('~' in setout)
       setout = {(t,l0):l for t,l0,l in \
         re.findall(r'\b(\w+)\.(\w+)\>(\w+)\b',setout)}
-    if self._tree is None:
-      self.optimize()
-    T,leaves,contract,c = self._tree_contract(self._tree)
-    assert len(contract) == 0
-    assert leaves == self._tdict.keys()
+    if len(self._tdict) > 1:
+      if self._tree is None:
+        self.optimize()
+      T,leaves,contract,c = self._tree_contract(self._tree)
+      assert len(contract) == 0
+      assert leaves == self._tdict.keys()
+    else:
+      # TODO do more explicitly
+      t = next(iter(self._tdict))
+      T = self._tlist[self._tdict[t]]
+      T = T.renamed({l:t+'.'+l for l in T.idxset})
+      c = self._conj[t]
     if c:
       T = T.conj()
     if not isinstance(T,Tensor):
@@ -935,6 +942,8 @@ class Network:
         else:
           bonddim[t] *= T.shape[l]
     tensors = set(self._tdict.keys())
+    if len(tensors) == 1:
+      return
     tenl = tuple(sorted(tensors))
     if config.memcap:
       memcap = config.memcap//config.memratio

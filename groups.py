@@ -850,7 +850,7 @@ class ProductGroup(Group):
                 W = np.tensordot(self.G.S(kg).conj(), np.identity(d1h*d2h), 0)
                 W = W.transpose((1,2,0,3)).reshape((d1g,d2g,d1h,d2h,d))
               elif qcflip == 2:
-                W = np.tensordot(np.identity(d1g*d2g), self.G.S(kh).conj(), 0)
+                W = np.tensordot(np.identity(d1g*d2g), self.H.S(kh).conj(), 0)
                 W = W.transpose((0,3,1,2)).reshape((d1g,d2g,d1h,d2h,d))
               else:
                 W = np.identity(d,dtype=REALTYPE).reshape((d1g,d2g,d1h,d2h,d))
