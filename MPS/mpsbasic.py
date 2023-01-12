@@ -820,8 +820,8 @@ class MPO(MPOgeneric):
         elif config.verbose or (niter%ncanon[chi] == 0):
           print(f'[{niter}] E={np.real(E+Eshift):0.8f} ({np.real(E0-E):+0.4g})')
         if abs(E0-E)<Edelta[chi]:
-          if savefile and ic < len(chi)-1:
-            pickle.dump((psi,(chi[ic+1],2,0)),open(savefile,'wb'))
+          if savefile and ic < len(chis)-1:
+            pickle.dump((psi,(chis[ic+1],2,0)),open(savefile,'wb'))
           break
         if savefile:
           pickle.dump((psi,(chi,1,niter+1)),open(savefile,'wb'))

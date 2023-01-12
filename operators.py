@@ -248,6 +248,8 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
         return linalg.eigvals(M)
     else:
       # Do the actual sparse computation
+      if config.lin_iter_verbose:
+        print('Diagonalizing operator with effective dimension',self._fuse_out.effective_dim)
       if isinstance(guess, Tensor):
         self._fuse_in.matchtensor(guess)
         guess = self.vector_out(guess)
