@@ -92,7 +92,7 @@ class Group(metaclass=GroupType):
       standard SU2 terminology)
   - indicate yields a modified Frobenius-Schur indicator
   - _fS, if set, maps quaternionic irreps to the "charge-conjugation" matrix
-      S such that S^H R_g S = R_g*
+      S such that S^H R_g S = R_g* (i.e. S : r* -> r)
     * stored in _Ss
   - isrep identifies whether irrep labels are good
   Additionally:
@@ -136,8 +136,7 @@ class Group(metaclass=GroupType):
 
   def verify_rep(self, r):
     if not self.isrep(r):
-      raise ValueError('Group %s expected representation, got %s' \
-        %(self.__repr__(), r))
+      raise ValueError(f'Group {self!r} expected representation, got {r!r}')
   
   def dim(self, r):
     """Retrieve dimension of irrep r"""
@@ -188,7 +187,7 @@ class Group(metaclass=GroupType):
         self._fusion[r2,r1] = fusion
       return fusion, CG0
     else:
-      return self._fusion[r1,r2], self._CG[r1,r2]
+      return list(self._fusion[r1,r2]), dict(self._CG[r1,r2])
 
   @abstractmethod
   def _ffusion(self, r1, r2):
@@ -1040,6 +1039,15 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
       if k1 == k:
         return n
     return 0
+
+  def full_iter(self):
+    """Generate a more ``complete'' iterator than self.__iter__():
+    instead of k,n, return k,n,d,i, for d=dimension of k and i=index"""
+    idx = 0
+    for k,n in self.__iter__():
+      d = self.group.dim(k)
+      yield k,n,d,idx
+      idx += n*d
 
   #def __getnewargs__(self):
   #  return (self._decomp,)

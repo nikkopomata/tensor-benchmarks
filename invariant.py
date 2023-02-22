@@ -133,7 +133,7 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
           ib = iblock
           for k,n in fo:
             do = cls.group.dim(k)
-            W.append(Wo[k].reshape((dl*dr,do*n)).T)
+            W.append(np.moveaxis(Wo[k],2,3).reshape((dl*dr,do*n)).T)
             # Put each copy with the appropriate irrep
             for io in range(nl*nr):
               idxO[k].extend(range(ib + io*dl*dr,ib+io*dl*dr+n*do))
@@ -605,6 +605,14 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
   @property
   def charge(self):
     return self._irrep
+
+  def add_singleton(self, l):
+    """Add index l corresponding to singleton dimension"""
+    assert re.fullmatch(r'\w+',l) # TODO parsing routine
+    assert l not in self._idxs
+    V = self.group.SumRep([(self.group.triv, 1)])
+    return self.__class__(np.expand_dims(self._T,axis=0), (l,)+self._idxs,
+      (V,)+self._spaces)
 
 
 class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):

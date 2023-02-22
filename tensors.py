@@ -312,7 +312,7 @@ class Tensor:
       else:
         raise ValueError('Unrecognized index %s in order'%ll)
     idxo = tuple(self._idxs.index(ll) for ll in order)
-    return self._T.transpose(idxo)
+    return self._T.transpose(idxo).copy()
 
   def matches(self, A, conj, strict=True):
     """Verify that indices match
@@ -1577,7 +1577,15 @@ class Tensor:
   @_endo_transformation
   def inv(M):
     M._T = linalg.inv(M._T)
-    
+
+  def add_singleton(self, l):
+    """Add index l corresponding to singleton dimension"""
+    assert re.fullmatch(r'\w+',l) # TODO parsing routine
+    assert l not in self._idxs
+    V = self.__class__._vspace_from_arg(1)
+    return self.__class__(np.expand_dims(self._T,axis=0), (l,)+self._idxs,
+      (V,)+self._spaces)
+      
 
   @classmethod
   def identify_indices(cls, idxs, *tens):

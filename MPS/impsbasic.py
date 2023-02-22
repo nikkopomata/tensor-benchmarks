@@ -66,6 +66,9 @@ class iMPS(MPSgeneric):
     psi._rightcanon = list(self._rightcanon)
     return psi
 
+  def issite(self, n):
+    return True
+
   def setTc(self, M, n):
     MPSgeneric.setTc(self, M, n%self._Nsites)
 
@@ -519,127 +522,6 @@ class iMPS(MPSgeneric):
     return MPSgeneric.rectifyright(self, n0, nf, tol)
 
   # TODO fidelity density
-
-  def expv1(self, O, parse, n):
-    # parse: t1-b1,t2-b2,...
-    subs = parse.split(',')
-    nO = len(subs)
-    t1,b1 = subs[0].split('-')
-    TL = self.getTR(n)
-    TL = TL.diag_mult('l',self.getschmidt(n-1))
-    if nO == 1:
-      # Single-site operator
-      T = TL.contract(TL,'r-r,l-l;b>b;b>t*')
-      return T.contract(O,f'b-{t1},t-{b1}')
-    T = TL.contract(TL,'l-l;b>b,r>rb;b>t,r>rt*').contract(O,f'b-{t1},t-{b1};~')
-    T = O.contract(TL,f'{t1}-b;~;r>rb').contract(TL,f'{b1}-b;~;r>rt*')
-    # Iterate over indices
-    for m in range(1,nO-1):
-      tm,bm = subs[m].split('-')
-      Tc = self.getTR(m+n)
-      T = T.contract(Tc,f'{tm}-b,rb-l;~;r>rb').contract(Tc,f'{bm}-b,rt-l;~;r>rt*')
-    nlast = n+nO-1
-    tn,bn = subs[-1].split('-')
-    TR = self._matrices[nlast]
-    TR = TR.diag_mult('r',self._schmidt[nlast])
-    T = T.contract(TR, f'{tn}-b,rb-l;~')
-    return T.contract(TR, f'{bn}-b,rt-l,r-r*')
-
-  def expv(self, parse, *Oxs):
-    """Expectation value of multiple operators
-    parse: t1-b1,t2-b2;t1-b1,...
-    args alternates sites & operators: x1, then O1 at site x1,
-      then x2, then O2 at site x2, etc.
-    fermionic case: include ^ at beginning or end of substring for any parity -1     operator; next argument should be parities of physical indices
-      (1d array/list if uniform, 2d array/list of lists/etc otherwise)"""
-    N = self.N
-    subs = parse.split(';')
-    nOs = len(subs)
-    fermionic = '^' in parse
-    Opar = nOs*[False] # Can just refer to this
-    Oxs = list(Oxs)
-    if fermionic:
-      # Process parity argument
-      parities = Oxs.pop(0)
-      if isinstance(parities[0],Number):
-        # Uniform
-        parities = N*[parities]
-      elif len(parities) < self._Nsites:
-        assert N % len(parities) == 0
-        nrep = N//len(parities)
-        if isinstance(parities, np.ndarray):
-          parities = np.tile(parities,(nrep,1))
-        else:
-          parities = nrep*parities
-      # Trim substrings, identify operator parities
-      for i,s in enumerate(subs):
-        if '^' in s:
-          Opar[i] = True
-          subs[i] = s.strip('^')
-    assert len(Oxs) == 2*nOs
-    Os = []
-    xs = []
-    for i in range(nOs):
-      xs.append(Oxs[2*i])
-      Os.append(Oxs[2*i+1])
-    if nOs == 1:
-      return self.expv1(Os[0], subs[0], xs[0])
-    # Iterate over operators
-    partot = False # Determination of whether JW string is needed
-    for iO, O in enumerate(Os):
-      # Pre-processing
-      x0 = xs[iO]
-      subsubs = subs[iO].split(',')
-      assert O.rank == 2*len(subsubs)
-      Orank = len(subsubs)
-      if partot:
-        # Apply parity operation to operator
-        O = O.diag_mult(subsubs[0].split('-')[1],parities[x0%N])
-      if iO:
-        # Include extant transfer matrix
-        tstr = 'M;O'
-        bstr = f'M.b-B{x0}.l,M.t-T{x0}.l'
-        Ts = [transf,O]
-      else:
-        # Contract left indices
-        tstr = 'O'
-        bstr = f'B{x0}.l-T{x0}.l'
-        Ts = [O]
-      for dx in range(Orank):
-        # Add info pertaining to site #x
-        x = dx+x0
-        # Prepare tensors
-        A = self.getTL(x)
-        it,ib = subsubs[dx].split('-')
-        tstr += f';T{x},B{x}*'
-        bstr += f',T{x}.b-O.{it},B{x}.b-O.{ib}'
-        if dx < Orank-1:
-          bstr += f',T{x}.r-T{x+1}.l,B{x}.r-B{x+1}.l'
-        elif iO == nOs-1:
-          # Will trace right index
-          bstr += f',T{x}.r-B{x}.r'
-          A = A.diag_mult('r',self.getschmidt(x))
-        Ts.append(A)
-      xf = x0+Orank-1
-      if iO < nOs-1:
-        # Output indices
-        ostr = f'T{xf}.r>t,B{xf}.r>b'
-      else:
-        ostr = ''
-      net = networks.Network.network(';'.join((tstr,bstr,ostr)),*Ts)
-      transf = net.contract()
-      # Change parity as necessary
-      if Opar[iO]:
-        partot = not partot
-      if iO < nOs-1:
-        # Contract with intermediate sites
-        x0 += Orank
-        assert x0 <= xs[iO+1]
-        for x in range(x0,xs[iO+1]):
-          A = self.getTL(x)
-          transf = transf.contract((A.diag_mult('b',parities[x%N]) if partot else A),'b-l;~;b>q,r>b*')
-          transf = transf.contract(A,'t-l,q-b;~;r>t')
-    return transf
 
   def tebd_sweep(self, Us, chi):
     # TODO

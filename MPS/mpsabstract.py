@@ -7,7 +7,7 @@ from numbers import Number
 from abc import ABC, abstractmethod
 from itertools import compress
 from collections import defaultdict
-import os.path, pickle,sys
+import os.path, pickle,sys, re
 import traceback
 
 keig = 5
@@ -232,11 +232,16 @@ class MPSgeneric(ABC):
       n0,N = n0
     else:
       N = self._Nsites
-    LTs = [LeftTransfer(self, n0-1, lr, *Os)]
-    LTs[0].setvalue(T0)
+    LTs = [self.getlefttransfer(T0, n0-1, lr, *Os)]
     for dn in range(1,N):
       LTs.append(LTs[-1].right())
     return LTs
+
+  def getlefttransfer(self, T0, n, lr, *Os):
+    # Left transfer with given value at specified site
+    T = LeftTransfer(self, n, lr, *Os)
+    T.setvalue(T0)
+    return T
 
   def righttransfers(self, T0, n0, lr, *Os):
     # Collect right transfer matrices starting with T0
@@ -250,11 +255,16 @@ class MPSgeneric(ABC):
       n0,N = n0
     else:
       N = self._Nsites
-    RTs = [RightTransfer(self, n0, lr, *Os)]
-    RTs[0].setvalue(T0)
+    RTs = [self.getrighttransfer(T0, n0, lr, *Os)]
     for dn in range(1,N):
       RTs.append(RTs[-1].left())
     return RTs
+
+  def getrighttransfer(self, T0, n, lr, *Os):
+    # Left transfer with given value at specified site
+    T = RightTransfer(self, n, lr, *Os)
+    T.setvalue(T0)
+    return T
 
   def getentropy(self, n):
     # Bipartite entropy at n
@@ -409,6 +419,155 @@ class MPSgeneric(ABC):
         Ld2 += np.linalg.norm(lb[lmin:])**2
       Ldiff += np.sqrt(Ld2)
     return Ldiff/self.N
+
+  def ancillaryat(self, site):
+   """For compatibility among subtypes with ancillary/purification/thermal
+   indices: if site is an integer, return set containing name(s) of ancillary
+   indices at site; otherwise (site is a list, set, etc.) return
+   set of (site,index) tuples"""
+   return {}
+
+  @abstractmethod
+  def issite(self, n):
+    """For compatibility among finite & infinite subtypes
+    Expects integer"""
+    return NotImplemented
+
+  def local_operator_expv(self, subparse, O, x0, lterm=False, rterm=False):
+    # Processing for expectation values of local operators
+    # subparse parses t1-b1,t2-b2,...
+    # O is the operator
+    # x0 is the initial site
+    # lterm/rterm are either boolean to indicate closed/open boundary or
+    #   otherwise are transfer matrices
+
+    # Pre-processing
+    subsubs = subparse.split(',')
+    Orank = len(subsubs)
+    assert O.rank == 2*Orank
+    # Tensors & parse string for network
+    # TODO dictionary-based initialization
+    tstr = 'O'
+    Ts = [O]
+    bstrs = []
+    ostr = ''
+    if isinstance(lterm,tensors.Tensor):
+      # Include extant transfer matrix
+      tstr += ';L'
+      bstrs = ['L.b-B0.l','L.t-T0.l']
+      Ts.append(lterm)
+    elif lterm:
+      if self.issite(x0-1):
+        #print('left term at',x0)#DEBUG
+        # Contract left indices
+        bstrs = ['B0.l-T0.l']
+    for dx in range(Orank):
+      # Add info pertaining to site #x
+      x = dx+x0
+      # Prepare tensors
+      A = self.getTL(x)
+      it,ib = subsubs[dx].split('-')
+      tstr += f';T{dx},B{dx}*'
+      bstrs.extend([f'T{dx}.b-O.{it}',f'B{dx}.b-O.{ib}'])
+      if dx < Orank-1:
+        bstrs.extend([f'T{dx}.r-T{dx+1}.l',f'B{dx}.r-B{dx+1}.l'])
+      Ts.append(A)
+      # Any additional indices
+      for anc in self.ancillaryat(x):
+        bstrs.append(f'T{dx}.{anc}-B{dx}.{anc}')
+    xf = x0+Orank-1
+    assert dx == Orank-1
+    if isinstance(rterm,tensors.Tensor):
+      # Include extant transfer matrix
+      tstr += ';R'
+      bstrs.extend([f'R.b-B{dx}.r',f'R.t-T{dx}.r'])
+      Ts.append(rterm)
+    elif rterm:
+      if self.issite(xf+1):
+        bstrs.append(f'B{dx}.r-T{dx}.r')
+        Ts[-1] = Ts[-1].diag_mult('r',self.getschmidt(xf))
+    if lterm is False:
+      if rterm is False:
+        ostr = f'T0.l>lt,B0.l>lb,T{dx}.r>rt,B{dx}.r>rb'
+      else:
+        ostr = 'T0.l>t,B0.l>b'
+    elif rterm is False:
+      ostr = f'T{dx}.r>t,B{dx}.r>b'
+    net = networks.Network.network(';'.join((tstr,','.join(bstrs),ostr)),*Ts)
+    transf = net.contract()
+    return transf
+
+  # TODO integrate expv1, expv subroutines
+  def expv1(self, O, parse, n):
+    # parse: t1-b1,t2-b2,...
+    return self.local_operator_expv(parse, O, n, lterm=True, rterm=True)
+
+  def expv(self, parse, *Oxs):
+    """Expectation value of multiple operators
+    parse: t1-b1,t2-b2;t1-b1,...
+    args alternates sites & operators: x1, then O1 at site x1,
+      then x2, then O2 at site x2, etc.
+    fermionic case: include ^ at beginning or end of substring for any parity -1     operator; next argument should be parities of physical indices
+      (1d array/list if uniform, 2d array/list of lists/etc otherwise)"""
+    N = self.N
+    subs = parse.split(';')
+    nOs = len(subs)
+    fermionic = '^' in parse
+    Opar = nOs*[False] # Can just refer to this
+    Oxs = list(Oxs)
+    if fermionic:
+      # Process parity argument
+      parities = Oxs.pop(0)
+      if isinstance(parities[0],Number):
+        # Uniform
+        parities = N*[parities]
+      elif len(parities) < self._Nsites:
+        assert N % len(parities) == 0
+        nrep = N//len(parities)
+        if isinstance(parities, np.ndarray):
+          parities = np.tile(parities,(nrep,1))
+        else:
+          parities = nrep*parities
+      # Trim substrings, identify operator parities
+      for i,s in enumerate(subs):
+        if '^' in s:
+          Opar[i] = True
+          subs[i] = s.strip('^')
+    assert len(Oxs) == 2*nOs
+    Os = []
+    xs = []
+    for i in range(nOs):
+      xs.append(Oxs[2*i])
+      Os.append(Oxs[2*i+1])
+    if nOs == 1:
+      return self.expv1(Os[0], subs[0], xs[0])
+    # Iterate over operators
+    partot = False # Determination of whether JW string is needed
+    transf = True
+    for iO, O in enumerate(Os):
+      x0 = xs[iO]
+      if partot:
+        # Apply parity operation
+        # TODO should not have "normal" behavior for width > 1?
+        ll = re.search(r'-(\w+)\b',subs[iO]).group(1)
+        O = O.diag_mult(ll, parities[x0])
+      transf = self.local_operator_expv(subs[iO], O, x0, lterm=transf,
+        rterm=(iO==nOs-1))
+      if iO == nOs-1:
+        # Completed
+        return transf
+      if Opar[iO]:
+        # Change parity as necessary
+        partot = not partot
+      x0 += O.rank//2
+      if x0 < xs[iO+1]:
+        # Contract with intermediate sites
+        T = self.getlefttransfer(transf, x0-1, 'l') 
+        for x in range(x0,xs[iO+1]):
+          T = T.right(fparity=(parities[x%self.N]) if partot else A)
+        transf = T.T
+      else:
+        assert x0 == xs[iO+1]
 
 class MPOgeneric:
   """MPO for a finite segment -- neither explicitly PBC nor OBC"""
@@ -905,7 +1064,8 @@ class TransferMatrix(ABC):
     return len(self.operators)
 
 class LeftTransfer(TransferMatrix):
-  def compute(self, TL):
+  def compute(self, TL, fparity=None):
+    # TODO fermion parity for right
     assert set(self.idxs) == TL.idxset
     if self._strict and not self.psi._leftcanon[self.site%self.psi.N]:
       raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
@@ -919,6 +1079,8 @@ class LeftTransfer(TransferMatrix):
     for n in range(self.depth):
       T = T.contract(self.operators[n].getT(self.site),
         f'{self.opidx[n]}-l,q-t;~;r>{self.opidx[n]},b>q')
+    if fparity is not None:
+      psiT = psiT.diag_mult('b',fparity)
     T = T.contract(psiT,f'b-l,q-b;~;r>b*')
     self.T = T
     return T
@@ -927,7 +1089,7 @@ class LeftTransfer(TransferMatrix):
     assert self._schmidtdir == 'l'
     self._strict = True
 
-  def right(self, terminal=False):
+  def right(self, terminal=False, fparity=None):
     if terminal:
       assert self.site == self.psi.N-2
       if self._schmidtdir == 'l':
@@ -938,10 +1100,12 @@ class LeftTransfer(TransferMatrix):
       for n in range(self.depth):
         T = T.contract(self.operators[n].getT(self.site+1),
           f'{self.opidx[n]}-l,q-t;~;b>q')
+      if fparity is not None:
+        psiT = psiT.diag_mult('b',fparity)
       return T.contract(psiT,'b-l,q-b*')
     Tnext = LeftTransfer(self.psi, self.site+1, self._schmidtdir, *self.operators)
     Tnext._strict = self._strict
-    Tnext.compute(self.T)
+    Tnext.compute(self.T, fparity=fparity)
     return Tnext
 
   def moveby(self, dn, collect=False):
