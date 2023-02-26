@@ -666,7 +666,7 @@ class ProductGroup(Group):
       self.__factors = 1+H.__factors
     else:
       self.__factors = 2
-    self._realforms = realforms
+    self._realforms = dict(realforms)
 
   @classmethod
   def get_identifier(cls, G, H):
