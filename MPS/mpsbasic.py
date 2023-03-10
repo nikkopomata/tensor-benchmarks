@@ -648,10 +648,14 @@ class MPO(MPOgeneric):
         psi0.restore_canonical(tol=tol0)
       psi = copy(psi0)
     E = self.expv(psi)
-    for ic,chi in enumerate(chis[ic0:]):
+    for ic,chi in enumerate(chis[ic0:],start=ic0):
       print(f'{chi=:>3} (#{ic})')
       for niter in range(i2[chi],nsweep2[chi]):
         # Perform two-site DMRG
+        if config.haltsig:
+          print('Exiting due to halt signal...')
+          import sys
+          sys.exit()
         E0 = E
         TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi])
         E = TRs[0].left().left(terminal=True)
@@ -672,6 +676,10 @@ class MPO(MPOgeneric):
         if savefile:
           pickle.dump((psi,(chi,2,niter+1)),open(savefile,'wb'))
       for niter in range(i1[chi],nsweep[chi]):
+        if config.haltsig:
+          print('Exiting due to halt signal...')
+          import sys
+          sys.exit()
         E0 = E
         if niter % ncanon[chi] == 0:
           psi.restore_canonical(almost_canon=True,tol=tol1[chi])

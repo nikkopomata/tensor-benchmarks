@@ -9,9 +9,6 @@ from collections import defaultdict
 import os.path, pickle,sys
 import traceback
 from .mpsabstract import *
-
-config.verbose = 1
-config.VDEBUG = 2
 keig = 5
 
 def randMPS(indphys, indvirt, N=None):
@@ -789,6 +786,7 @@ class iMPO(MPOgeneric):
       chis,chi = chi,chi[0]
     else:
       chis = [chi]
+    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,0,0)
     ic0 = 0
     sd = 2
     sweep = 0
@@ -796,8 +794,17 @@ class iMPO(MPOgeneric):
     if savefile and cont and os.path.isfile(savefile):
       print('reloading from',savefile)
       psi, (ltransf,rtransf), sv = pickle.load(open(savefile,'rb'))
+      ltransf.operators = (self,)
+      rtransf.operators = (self,)
       if isinstance(sv, tuple):
-        chi, sd, sweep = sv
+        chi, sd, sweep, E, E0 = sv
+        print(f'Start at: chi={chi}, {sd}x, sweep #{sweep}')
+        if sd == 1:
+          # Skip double
+          nsweep2[chi] = 0
+          i1[chi] = sweep
+        else:
+          i2[chi] = sweep
         ic0 = chis.index(chi)
       else:
         ic0 = -1
@@ -822,6 +829,13 @@ class iMPO(MPOgeneric):
           chi = chis[ic0]
           if ic0:
             print(f'Completed with chi={chis[ic0-1]} (E={sv:0.8f})')
+      #s0 = psi.getschmidt(-1)
+      #T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
+      #E0 = T.contract(rtransf.T,'t-t,c-c,b-b')
+      #rtransf = rtransf.moveby(psi.N)
+      #ltransf = ltransf.moveby(psi.N)
+      #T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
+      #E = T.contract(rtransf.T,'t-t,c-c,b-b')
       psi0 = copy(psi)
     else:
       if isinstance(psi0,str):
@@ -854,20 +868,24 @@ class iMPO(MPOgeneric):
           if n:
             dEl = lE0-lE
             dEr = rE0-rE
-            if diff < Edelta and abs(dEl)/persweep+abs(dEr)/persweep < Edelta and abs(lE-rE)/persweep < Edelta:
+            if diff < Edelta[chi] and abs(dEl)/persweep+abs(dEr)/persweep < Edelta[chi] and abs(lE-rE)/persweep < Edelta[chi]:
               break
           lE0,rE0 = lE,rE
           lT0,rT0 = ltransf.T,rtransf.T
         E0 = (lE+rE)/(2*ncheck)
         dE0 = (dEl+dEr)/(2*ncheck)
-    for ic,chi in enumerate(chis):
+    for ic,chi in enumerate(chis[ic0:],start=ic0):
       if ic0 > ic:
         continue
       print(f'{chi=:>3} (#{ic})')
       persweep = (psi.N+1)*psi.N
       # right: N-2 + N*(N-1) + N+2 #rtransf
       # left : N + (N+1)*(N-1) + 1 #ltransf
-      for niter in range(nsweep2):
+      for niter in range(i2[chi],nsweep2[chi]):
+        if config.haltsig:
+          print('Exiting due to halt signal...')
+          import sys
+          sys.exit()
         if config.verbose > config.VDEBUG: #DEBUG
           print('Initializer:',np.real(ltransf.initializer()),np.real(rtransf.initializer()))
         # Perform two-site DMRG
@@ -875,19 +893,19 @@ class iMPO(MPOgeneric):
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
         E0 = T.contract(rtransf.T,'t-t,c-c,b-b')
-        ltransf,rtransf = self.DMRGsweep_double(psi,ltransf,rtransf,chi,tol=tol)
+        ltransf,rtransf = self.DMRGsweep_double(psi,ltransf,rtransf,chi,tol=tol[chi])
         if config.verbose >= config.VDEBUG:
           psi.printcanon() #DEBUG
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
         E = T.contract(rtransf.T,'t-t,c-c,b-b')
-        if config.verbose or (niter%ncanon2 == 0):
+        if config.verbose or (niter%ncanon2[chi] == 0):
           print(f'[{niter}]\t{np.real(E-E0)/(2*persweep)}')
-        if (niter+1)%ncanon2 == 0:
+        if (niter+1)%ncanon2[chi] == 0:
           # Reset transfer matrices
           El = ltransf.Ereduce()/persweep
           Er = rtransf.Ereduce()/persweep
-          mLs,mRs = psi.restore_canonical(tol=tol1,gauge=True,almost_canon=True)
+          mLs,mRs = psi.restore_canonical(tol=tol1[chi],gauge=True,almost_canon=True)
           # Re-gauge transfers
           ltransf = self.reset_ltransfer(ltransf,mRs[-1],tol0)
           rtransf = self.reset_rtransfer(rtransf,mLs[0],tol0)
@@ -904,23 +922,29 @@ class iMPO(MPOgeneric):
             elif len(lb) > lmin:
               Ld2 += np.linalg.norm(lb[lmin:])**2
             Ldiff += np.sqrt(Ld2)
-          Ldiff /= ncanon2*self.N # Normalize to approximate # of updates
-          print(f'\t{Ldiff:0.6g}\t{np.real(El/ncanon2):0.6f}/{np.real(Er/ncanon2):0.6f}')
-          if Ldiff < delta2:
+          Ldiff /= ncanon2[chi]*self.N # Normalize to approximate # of updates
+          print(f'\t{Ldiff:0.6g}\t{np.real(El/ncanon2[chi]):0.6f}/{np.real(Er/ncanon2[chi]):0.6f}')
+          if Ldiff < delta2[chi]:
             break
           psi0 = copy(psi)
         if savefile:
-          pickle.dump((psi,(ltransf,rtransf),(chi,2,niter)),open(savefile,'wb'))
+          pickle.dump((psi,(ltransf,rtransf),(chi,2,niter+1,E,E0)),open(savefile,'wb'))
       Es0 = np.real(E-E0)
       persweep = (psi.N+1)*psi.N
       # right: (N+1)*(N-1) + N+1
       # left : N + (N+1)*(N-1) + 1
-      for niter in range(nsweep):
+      for niter in range(i1[chi],nsweep[chi]):
+        if savefile:
+          pickle.dump((psi,(ltransf,rtransf),(chi,1,niter,E,E0)),open(savefile,'wb'))
+        if config.haltsig:
+          print('Exiting due to halt signal...')
+          import sys
+          sys.exit()
         if config.verbose > config.VDEBUG: #DEBUG
           print('Initializer:',np.real(ltransf.initializer()),np.real(rtransf.initializer()))
         E0 = E
-        if niter % ncanon == 0:
-          mLs,mRs = psi.restore_canonical(gauge=True,tol=tol1,almost_canon=True)
+        if niter % ncanon[chi] == 0:
+          mLs,mRs = psi.restore_canonical(gauge=True,tol=tol1[chi],almost_canon=True)
           if config.verbose >= config.VDEBUG:
             psi.printcanon(compare=True)
           ltransf = self.reset_ltransfer(ltransf,mRs[-1],tol0)
@@ -938,22 +962,20 @@ class iMPO(MPOgeneric):
           if config.verbose:
             print(f'\t {np.real(E0-E)/(2*psi.N):0.8f}')
           Esweep = np.real(E0-E)/(2*psi.N)*persweep
-        ltransf,rtransf = self.DMRGsweep_single(psi, ltransf,rtransf, tol=tol1)
+        ltransf,rtransf = self.DMRGsweep_single(psi, ltransf,rtransf, tol=tol1[chi])
         # Compute energy
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
         E = T.contract(rtransf.T,'t-t,c-c,b-b')
         Esweep = np.real(E-E0)
-        if config.verbose or (niter%ncanon == 0):
+        if config.verbose or (niter%ncanon[chi] == 0):
           print(f'[{niter}] E={Esweep/(2*persweep):0.8f} ({(Es0-Esweep):+0.4g})')
-        if abs(Es0-Esweep)<Edelta:
+        if abs(Es0-Esweep)<Edelta[chi]:
           break
         Es0 = Esweep
-        if savefile:
-          pickle.dump((psi,(ltransf,rtransf),(chi,1,niter)),open(savefile,'wb'))
       Efin = Esweep/(2*persweep)
       # Restore canonical form
-      mLs,mRs = psi.restore_canonical(gauge=True,tol=tol1,almost_canon=True)
+      mLs,mRs = psi.restore_canonical(gauge=True,tol=tol1[chi],almost_canon=True)
       if config.verbose >= config.VDEBUG:
         psi.printcanon(compare=True)
       ltransf = self.reset_ltransfer(ltransf,mRs[-1],tol0)
