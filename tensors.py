@@ -1174,11 +1174,35 @@ class Tensor:
     try:
       T = np.tensordot(self._T,arr2,[i1,i2])
     except MemoryError as me:
+      print('Handling MemoryError in Tensor._do_contract...')
       print(copy(self.shape))
       print(copy(T2.shape))
       print('%dx%d->%d'%(self.numel,T2.numel,
         functools.reduce(int.__mul__,[v.dim for v in vout1+vout2])))
-      raise me
+      import gc
+      print('Total elements of tensors in garbage-collection generations:')
+      for gcgen in range(3):
+        nten = 0
+        numel = 0
+        for obj in gc.get_objects(generation=gcgen):
+          if isinstance(obj,Tensor):
+            nten += 1
+            numel += obj.numel
+        print(f'#{gcgen}: {numel:,d} ({nten} objects)')
+      print('Performing collection...')
+      gc.collect()
+      print('Updated element counts:')
+      for gcgen in range(3):
+        nten = 0
+        numel = 0
+        for obj in gc.get_objects(generation=gcgen):
+          if isinstance(obj,Tensor):
+            nten += 1
+            numel += obj.numel
+        print(f'#{gcgen}: {numel:,d} ({nten} objects)')
+      print('Re-trying contraction...')
+      T = np.tensordot(self._T,arr2,[i1,i2])
+      #raise me
     if len(lout1)+len(lout2) == 0: # Scalar
       return T[()]
     return self._tensorfactory(T, tuple(lout1+lout2), tuple(vout1+vout2), **tf_args)

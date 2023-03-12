@@ -1112,13 +1112,15 @@ class LeftTransfer(TransferMatrix):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
       self.psi.printcanon()
     Tl = self
-    Ts = [self]
-    for n in range(dn):
-      Tl = Tl.right()
-      Ts.append(Tl)
     if collect:
+      Ts = [self]
+      for n in range(dn):
+        Tl = Tl.right()
+        Ts.append(Tl)
       return Ts
     else:
+      for n in range(dn):
+        Tl = Tl.right()
       return Tl
 
   def Ereduce(self):
@@ -1206,13 +1208,15 @@ class RightTransfer(TransferMatrix):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
       self.psi.printcanon()
     Tl = self
-    Ts = [self]
-    for n in range(dn):
-      Tl = Tl.left()
-      Ts.append(Tl)
     if collect:
+      Ts = [self]
+      for n in range(dn):
+        Tl = Tl.left()
+        Ts.append(Tl)
       return Ts
     else:
+      for n in range(dn):
+        Tl = Tl.left()
       return Tl
 
   def Ereduce(self):
