@@ -779,10 +779,10 @@ class iMPO(MPOgeneric):
     # tol0 is threshold for initialization
     # Save psi, (LT,RT), E when complete
     #   At intermediate stage save psi, (LT,RT),(chi,#site-per-update,sweep) 
-    if isinstance(chi,list):
-      chis,chi = chi,chi[0]
-    else:
+    if isinstance(chi,int):
       chis = [chi]
+    else:
+      chis,chi = chi,chi[0]
     nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,0,0)
     ic0 = 0
     sd = 2
