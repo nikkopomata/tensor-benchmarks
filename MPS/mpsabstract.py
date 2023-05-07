@@ -930,7 +930,7 @@ class MPOgeneric:
   def DMRG_opt_single(self, psi, n, TL, TR, right, gL=None, gR=None, tol=None):
     assert (TL.site - (n-1))%self.N == 0
     assert (TR.site - (n+1))%self.N == 0
-    if config.verbose > 1:
+    if config.verbose > 3:
       print('Optimizing site',n%self.N)
     if gL is not None and gR is None:
       M0 = psi.getTR(n).mat_mult('l-r',gL).diag_mult('l',psi.getschmidt(n-1))
@@ -978,7 +978,7 @@ class MPOgeneric:
     # Incorporate Schmidt coefficients on either side
     assert (TL.site - (n-1))%self.N == 0
     assert (TR.site - (n+2))%self.N == 0
-    if config.verbose > 1:
+    if config.verbose > 3:
       print(f'Optimizing sites {n%self.N}-{(n+1)%self.N}')
     if (Ulr is None) or right:
       ML = psi.getTL(n)

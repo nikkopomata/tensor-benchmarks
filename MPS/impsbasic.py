@@ -692,8 +692,8 @@ class iMPO(MPOgeneric):
     # -s- Tr -s- <= -- s(new) -- gauge -- s(old)^-1 -- s(old) -- Tr -s-
     # Sweep right
     for n in range(0,N):
-      if config.verbose >= config.VDEBUG:
-        print('single-update at site',n,'->') #DEBUG
+      if config.verbose >= 2:
+        print('single-update at site',n,'->')
       Ul = self.DMRG_opt_single(psi, n, ltransf, rtransf, True, Ul, Ur, tol)
       # -- T -- => -- T -- s(new) -- gauge unitary -- s(old)^-1 --
       ltransf = ltransf.right()
@@ -701,7 +701,7 @@ class iMPO(MPOgeneric):
       Ur = psi.rectifyright(n+1,n+2)
       rtransf = rtransf.moveby(N-1)
     # Sweep left
-    if config.verbose >= config.VDEBUG: #DEBUG
+    if config.verbose >= 3:
       print('single-update at site',N,'<-')
     Ur = self.DMRG_opt_single(psi, N, ltransf, rtransf, False, Ul, Ur, tol)
     # -- T => -- s(old)^-1 -- gauge unitary -- s(new) -- T
@@ -712,7 +712,7 @@ class iMPO(MPOgeneric):
       ltransf.gauge(Ur)
       Ul = psi.rectifyleft(n+1,n)
       ltransf = ltransf.moveby(N-1)
-      if config.verbose >= config.VDEBUG:
+      if config.verbose >= 3:
         print('single-update at site',n,'<-') #DEBUG
       Ur = self.DMRG_opt_single(psi, n, ltransf, rtransf, n==-1, Ul, Ur, tol)
       # In last step reverse by performing at -1
@@ -739,8 +739,7 @@ class iMPO(MPOgeneric):
       Ur = None
     rtransf = rtransf.moveby(N-2)
     for n in range(0,N):
-      if config.verbose >= config.VDEBUG:
-        #DEBUG
+      if config.verbose >= 2:
         print('double-update at site',n,'->')
       self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ur, True, tol)
       # Add unit cell to move transfers +1
@@ -751,8 +750,7 @@ class iMPO(MPOgeneric):
         Ur = None
       rtransf = rtransf.moveby(N-1)
     # Left sweep
-    if config.verbose >= config.VDEBUG:
-      #DEBUG
+    if config.verbose >= 2:
       print('double-update at site',N,'<-')
     self.DMRG_opt_double(psi, N, chi, ltransf, rtransf, Ur, True, tol)
     for n in range(N-1,-2,-1):
@@ -762,8 +760,7 @@ class iMPO(MPOgeneric):
       else:
         Ul = None
       ltransf = ltransf.moveby(N-1)
-      if config.verbose >= config.VDEBUG:
-        #DEBUG
+      if config.verbose >= 2:
         print('double-update at site',n,'<-')
       self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ul, False, tol)
     # Send back to 0

@@ -31,7 +31,7 @@ def restrict_memory(newmemcap):
 # Verbosity levels
 linalg_verbose = 1 # Verbosity for linear-algebraic functions
 lin_iter_verbose = 0 # Verbosity for iterative linear-algebraic functions
-VDEBUG = 3 # Debugging verbosity level
+VDEBUG = 5 # Debugging verbosity level
 verbose = 1 # General verbosity
 opt_verbose = 0 # Verbosity for optimization routines
 

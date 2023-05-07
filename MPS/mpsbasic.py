@@ -519,6 +519,8 @@ class MPO(MPOgeneric):
     for n in range(1,self.N-1):
       if config.verbose > config.VDEBUG:
         print(f'site {n}, transfers {len(TLs)} .. {len(TRs)}')
+      elif config.verbose >= 3:
+        print(f'single-update at site',n,'->')
       TLs.append(TL)
       mat = self.DMRG_opt_single(psi, n, TL, TRs.pop(0), True, mat, None, tol)
       TL = TL.right()
@@ -534,6 +536,8 @@ class MPO(MPOgeneric):
       TRs.insert(0,TR)
       if config.verbose > config.VDEBUG:
         print(f'site {n}, transfers {len(TLs)} .. {len(TRs)}')
+      elif config.verbose >= 3:
+        print(f'single-update at site',n,'<-')
       mat = self.DMRG_opt_single(psi, n, TLs.pop(), TR, False, None, mat, tol)
       TR = TR.left()
       # -- T -- => -- s(old)^-1 -- gauge unitary -- s(new) -- T --
@@ -564,6 +568,8 @@ class MPO(MPOgeneric):
       TLs.append(TL)
       if config.verbose > config.VDEBUG:
         print(f'site {n}/{n+1}, transfers {len(TLs)} .. {len(TRs)}, schmidt rank {len(psi._schmidt[n])}')
+      elif config.verbose >= 2:
+        print(f'double update at sites {n}->{n+1}')
       self.DMRG_opt_double(psi, n, chi, TL, TRs.pop(0), None, True, tol)
       TL = TL.right()
     # Optimize on right side
@@ -574,6 +580,8 @@ class MPO(MPOgeneric):
     for n in range(self.N-3,0,-1):
       if config.verbose > config.VDEBUG:
         print(f'site {n}/{n+1}, transfers {len(TLs)} .. {len(TRs)}, schmidt rank {len(psi._schmidt[n])}')
+      elif config.verbose >= 2:
+        print(f'double update at sites {n}<-{n+1}')
       TRs.insert(0,TR)
       self.DMRG_opt_double(psi, n, chi, TLs.pop(), TR, None, False, tol)
       TR = TR.left()

@@ -1174,13 +1174,14 @@ class Tensor:
     try:
       T = np.tensordot(self._T,arr2,[i1,i2])
     except MemoryError as me:
-      print('Handling MemoryError in Tensor._do_contract...')
-      print(copy(self.shape))
-      print(copy(T2.shape))
+      import sys
+      print('Handling MemoryError in Tensor._do_contract...',file=sys.stderr)
+      print(copy(self.shape),file=sys.stderr)
+      print(copy(T2.shape),file=sys.stderr)
       print('%dx%d->%d'%(self.numel,T2.numel,
-        functools.reduce(int.__mul__,[v.dim for v in vout1+vout2])))
+        functools.reduce(int.__mul__,[v.dim for v in vout1+vout2])),file=sys.stderr)
       import gc
-      print('Total elements of tensors in garbage-collection generations:')
+      print('Total elements of tensors in garbage-collection generations:',file=sys.stderr)
       for gcgen in range(3):
         nten = 0
         numel = 0
@@ -1188,10 +1189,10 @@ class Tensor:
           if isinstance(obj,Tensor):
             nten += 1
             numel += obj.numel
-        print(f'#{gcgen}: {numel:,d} ({nten} objects)')
-      print('Performing collection...')
+        print(f'#{gcgen}: {numel:,d} ({nten} objects)',file=sys.stderr)
+      print('Performing collection...',file=sys.stderr)
       gc.collect()
-      print('Updated element counts:')
+      print('Updated element counts:',file=sys.stderr)
       for gcgen in range(3):
         nten = 0
         numel = 0
@@ -1199,8 +1200,8 @@ class Tensor:
           if isinstance(obj,Tensor):
             nten += 1
             numel += obj.numel
-        print(f'#{gcgen}: {numel:,d} ({nten} objects)')
-      print('Re-trying contraction...')
+        print(f'#{gcgen}: {numel:,d} ({nten} objects)',file=sys.stderr)
+      print('Re-trying contraction...',file=sys.stderr)
       T = np.tensordot(self._T,arr2,[i1,i2])
       #raise me
     if len(lout1)+len(lout2) == 0: # Scalar
