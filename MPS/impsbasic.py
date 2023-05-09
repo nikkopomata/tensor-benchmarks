@@ -682,7 +682,7 @@ class iMPO(MPOgeneric):
         break
     return rtransf
 
-  def DMRGsweep_single(self, psi, ltransf, rtransf, tol=None):
+  def DMRGsweep_single(self, psi, ltransf, rtransf, tol=None, eigtol=None):
     N = self.N
     # Start on left side: transfers at 0
     Ur = psi.rectifyright(0,1)
@@ -694,7 +694,7 @@ class iMPO(MPOgeneric):
     for n in range(0,N):
       if config.verbose >= 2:
         print('single-update at site',n,'->')
-      Ul = self.DMRG_opt_single(psi, n, ltransf, rtransf, True, Ul, Ur, tol)
+      Ul = self.DMRG_opt_single(psi, n, ltransf, rtransf, True, Ul, Ur, tol, eigtol)
       # -- T -- => -- T -- s(new) -- gauge unitary -- s(old)^-1 --
       ltransf = ltransf.right()
       rtransf.gauge(Ul)
@@ -703,7 +703,7 @@ class iMPO(MPOgeneric):
     # Sweep left
     if config.verbose >= 3:
       print('single-update at site',N,'<-')
-    Ur = self.DMRG_opt_single(psi, N, ltransf, rtransf, False, Ul, Ur, tol)
+    Ur = self.DMRG_opt_single(psi, N, ltransf, rtransf, False, Ul, Ur, tol, eigtol)
     # -- T => -- s(old)^-1 -- gauge unitary -- s(new) -- T
     # Sweep left
     for n in range(self.N-1,-2,-1):
@@ -714,7 +714,7 @@ class iMPO(MPOgeneric):
       ltransf = ltransf.moveby(N-1)
       if config.verbose >= 3:
         print('single-update at site',n,'<-') #DEBUG
-      Ur = self.DMRG_opt_single(psi, n, ltransf, rtransf, n==-1, Ul, Ur, tol)
+      Ur = self.DMRG_opt_single(psi, n, ltransf, rtransf, n==-1, Ul, Ur, tol, eigtol)
       # In last step reverse by performing at -1
     Ul = Ur # U is mislabeled due to direction reversal
     # right transfer matrix is already at 0
@@ -727,7 +727,7 @@ class iMPO(MPOgeneric):
     psi.lgauge(Ul,0)
     return ltransf,rtransf
 
-  def DMRGsweep_double(self, psi, ltransf, rtransf, chi, tol=None):
+  def DMRGsweep_double(self, psi, ltransf, rtransf, chi, tol=None, eigtol=None):
     # Should start out as canonical (?)
     N = self.N
     # Sweep rightward
@@ -741,7 +741,7 @@ class iMPO(MPOgeneric):
     for n in range(0,N):
       if config.verbose >= 2:
         print('double-update at site',n,'->')
-      self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ur, True, tol)
+      self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ur, True, tol, eigtol)
       # Add unit cell to move transfers +1
       ltransf = ltransf.right()
       if N > 2:
@@ -752,7 +752,7 @@ class iMPO(MPOgeneric):
     # Left sweep
     if config.verbose >= 2:
       print('double-update at site',N,'<-')
-    self.DMRG_opt_double(psi, N, chi, ltransf, rtransf, Ur, True, tol)
+    self.DMRG_opt_double(psi, N, chi, ltransf, rtransf, Ur, True, tol, eigtol)
     for n in range(N-1,-2,-1):
       rtransf = rtransf.left()
       if N > 2:
@@ -762,7 +762,7 @@ class iMPO(MPOgeneric):
       ltransf = ltransf.moveby(N-1)
       if config.verbose >= 2:
         print('double-update at site',n,'<-')
-      self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ul, False, tol)
+      self.DMRG_opt_double(psi, n, chi, ltransf, rtransf, Ul, False, tol, eigtol)
     # Send back to 0
     ltransf = ltransf.right()
     rtransf = rtransf.left()
@@ -770,6 +770,7 @@ class iMPO(MPOgeneric):
 
   def do_dmrg(self, psi0, chi, Edelta=1e-10, delta2=1e-8,ncanon=10,ncanon2=10,
               nsweep=1000,nsweep2=100,tol=1e-12,tol1=None,tol0=1e-12,
+              eigtol=None,eigtol_rel=None,
               transfinit=100,savefile=None,saveprefix=None,cont=False):
     # Instead of alternating single + double update perform double update
     # until reaching threshold delta2 (or nsweep2 iterations) then
@@ -777,13 +778,17 @@ class iMPO(MPOgeneric):
     # Use tol for error threshold in chi^2 truncations (two-site update),
     # tol1 for error threshold in chi^1 svd (one-site update + canonical form)
     # tol0 is threshold for initialization
+    # eigtol is the tolerance for Lanczos eigensolver
+    #  (by default ARPACK uses machine precision)
+    # eigtol_rel instead sets eigtol based on change in E between updates
+    #  (eigtol <= |E-E0|*eigtol_rel)
     # Save psi, (LT,RT), E when complete
     #   At intermediate stage save psi, (LT,RT),(chi,#site-per-update,sweep) 
     if isinstance(chi,int):
       chis = [chi]
     else:
       chis,chi = chi,chi[0]
-    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,0,0)
+    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,eigtol,eigtol_rel,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,eigtol,eigtol_rel,0,0)
     ic0 = 0
     sd = 2
     sweep = 0
@@ -870,7 +875,7 @@ class iMPO(MPOgeneric):
           lE0,rE0 = lE,rE
           lT0,rT0 = ltransf.T,rtransf.T
         E0 = (lE+rE)/(2*ncheck)
-        dE0 = (dEl+dEr)/(2*ncheck)
+    Es0 = None
     for ic,chi in enumerate(chis[ic0:],start=ic0):
       if ic0 > ic:
         continue
@@ -878,6 +883,7 @@ class iMPO(MPOgeneric):
       persweep = (psi.N+1)*psi.N
       # right: N-2 + N*(N-1) + N+2 #rtransf
       # left : N + (N+1)*(N-1) + 1 #ltransf
+      etol = eigtol[chi] if eigtol_rel[chi] is not None else None
       for niter in range(i2[chi],nsweep2[chi]):
         if config.haltsig:
           print('Exiting due to halt signal...')
@@ -890,14 +896,28 @@ class iMPO(MPOgeneric):
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
         E0 = T.contract(rtransf.T,'t-t,c-c,b-b')
-        ltransf,rtransf = self.DMRGsweep_double(psi,ltransf,rtransf,chi,tol=tol[chi])
+        if etol is None and eigtol_rel[chi]:
+          # TODO better initial tolerance value 
+          etol = eigtol_rel[chi]*abs(E0)
+          if etol < max(Edelta[chi],delta2[chi]):
+            # Presume artificially low initial energy
+            etol = eigtol_rel[chi]
+        ltransf,rtransf = self.DMRGsweep_double(psi,ltransf,rtransf,chi,tol=tol[chi],eigtol=etol)
         if config.verbose >= config.VDEBUG:
           psi.printcanon() #DEBUG
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
         E = T.contract(rtransf.T,'t-t,c-c,b-b')
+        if eigtol_rel[chi]:
+          # Update relative tolerance
+          if Es0 is None:
+            # Just use value from sweep
+            etol = abs(E-E0)*eigtol_rel[chi]/persweep
+          else:
+            etol = abs(E-E0-Es0)*eigtol_rel[chi]/persweep
+        Es0 = np.real(E-E0)
         if config.verbose or (niter%ncanon2[chi] == 0):
-          print(f'[{niter}]\t{np.real(E-E0)/(2*persweep)}')
+          print(f'[{niter}]\t{Es0/(2*persweep)}')
         if (niter+1)%ncanon2[chi] == 0:
           # Reset transfer matrices
           El = ltransf.Ereduce()/persweep
@@ -959,7 +979,7 @@ class iMPO(MPOgeneric):
           if config.verbose:
             print(f'\t {np.real(E0-E)/(2*psi.N):0.8f}')
           Esweep = np.real(E0-E)/(2*psi.N)*persweep
-        ltransf,rtransf = self.DMRGsweep_single(psi, ltransf,rtransf, tol=tol1[chi])
+        ltransf,rtransf = self.DMRGsweep_single(psi, ltransf,rtransf, tol=tol1[chi], eigtol=etol)
         # Compute energy
         s0 = psi.getschmidt(-1)
         T = ltransf.T.diag_mult('t',s0).diag_mult('b',s0)
@@ -969,6 +989,8 @@ class iMPO(MPOgeneric):
           print(f'[{niter}] E={Esweep/(2*persweep):0.8f} ({(Es0-Esweep):+0.4g})')
         if abs(Es0-Esweep)<Edelta[chi]:
           break
+        if eigtol_rel[chi]:
+          etol = abs(Es0-Esweep)*eigtol_rel[chi]
         Es0 = Esweep
       Efin = Esweep/(2*persweep)
       # Restore canonical form

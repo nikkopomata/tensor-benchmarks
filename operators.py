@@ -262,6 +262,22 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       else:
         rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
           v0=guess,**eigs_kw)
+      if 'tol' in eigs_kw and eigs_kw['tol'] and k>1:
+        # Check difference in eigenvalues is outside tolerance
+        w = rv[0] if vecs else rv
+        if abs(w[0] - w[1]) >= abs(w[0])*eigs_kw['tol']:
+          if config.lin_iter_verbose:
+            print('Eigenvalue difference outside tolerance '
+              f'({abs(1-w[1]/w[0]):0.2g} versus {eigs_kw["tol"]:0.2g}')
+          # Fall back to explicit
+          M = self.compute_dense_matrix()
+        if vecs:
+          rv = _eig_vec_process(M, herm, False, None, False, None)
+          rv = rv[:2]
+        elif herm:
+          return linalg.eigvalsh(M)
+        else:
+          return linalg.eigvals(M)
       if not vecs:
         return rv
     w, vs = rv

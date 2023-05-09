@@ -927,7 +927,8 @@ class MPOgeneric:
   def getT(self, n):
     return self._matrices[n]
 
-  def DMRG_opt_single(self, psi, n, TL, TR, right, gL=None, gR=None, tol=None):
+  def DMRG_opt_single(self, psi, n, TL, TR, right, gL=None, gR=None, tol=None,
+      eigtol=None):
     assert (TL.site - (n-1))%self.N == 0
     assert (TR.site - (n+1))%self.N == 0
     if config.verbose > 3:
@@ -944,6 +945,7 @@ class MPOgeneric:
     Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'
       'L.c-O.l,O.r-R.c,O.t-T.b;L.b>l,R.b>r,O.b>b', TL.T,self.getT(n),TR.T)
     #if Heff.shape[0] <= keig+1: #TODO remove
+    kw = dict(tol=eigtol) if eigtol is not None else {}
     if False:
       Heff = Heff.asdense(inprefix='t',outprefix='')
       if psi.charged_at(n):
@@ -953,7 +955,7 @@ class MPOgeneric:
     else:
       if psi.charged_at(n):
         Heff.charge(psi.irrep)
-      w,v = Heff.eigs(keig,which='SA',guess=M0)
+      w,v = Heff.eigs(keig,which='SA',guess=M0,**kw)
     v = v[np.argmin(w)]
     if config.verbose > config.VDEBUG:
       print('deviation',1-abs(M0.contract(v,'l-l,r-r,b-b*'))/abs(M0)/abs(v))
@@ -972,7 +974,8 @@ class MPOgeneric:
       psi.setschmidt(s/np.linalg.norm(s),n-1)
       return ML
 
-  def DMRG_opt_double(self, psi, n, chi, TL, TR, Ulr, right, tol=None):
+  def DMRG_opt_double(self, psi, n, chi, TL, TR, Ulr, right, tol=None,
+      eigtol=None):
     # TODO can we optimize the truncation better than naive svd?
     # Starting tensor guess
     # Incorporate Schmidt coefficients on either side
@@ -994,6 +997,7 @@ class MPOgeneric:
     Heff = operators.NetworkOperator('L;(T);Ol;Or;R;L.t-T.l,R.t-T.r,'
       'L.c-Ol.l,Ol.r-Or.l,Or.r-R.c,Ol.t-T.bl,Or.t-T.br;'
       'L.b>l,R.b>r,Ol.b>bl,Or.b>br', TL.T,self.getT(n),self.getT(n+1),TR.T)
+    kw = dict(tol=eigtol) if eigtol is not None else {}
     #if Heff.shape[0] <= keig+1: #TODO remove
     if False:
       # TODO efficient dense calculation, perform eig in operators
@@ -1007,7 +1011,7 @@ class MPOgeneric:
       if psi.charged_at(n) or psi.charged_at(n+1):
         Heff.charge(psi.irrep)
       # Leading eigenvector (smallest `algebraic' part)
-      w,v = Heff.eigs(keig,which='SA',guess=M0)
+      w,v = Heff.eigs(keig,which='SA',guess=M0,**kw)
     if psi.charged_at(n+1):
       MR,s,ML = v[np.argmin(w)].svd('r,br|l,r|bl,l',chi=chi, tolerance=tol)
     else:
