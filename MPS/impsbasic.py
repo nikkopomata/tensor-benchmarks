@@ -883,7 +883,7 @@ class iMPO(MPOgeneric):
       persweep = (psi.N+1)*psi.N
       # right: N-2 + N*(N-1) + N+2 #rtransf
       # left : N + (N+1)*(N-1) + 1 #ltransf
-      etol = eigtol[chi] if eigtol_rel[chi] is not None else None
+      etol = eigtol[chi] if eigtol_rel[chi] is None else None
       for niter in range(i2[chi],nsweep2[chi]):
         if config.haltsig:
           print('Exiting due to halt signal...')

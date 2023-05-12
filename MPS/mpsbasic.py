@@ -460,7 +460,7 @@ class MPO(MPOgeneric):
     psi.setschmidt(s/np.linalg.norm(s),n-1)
     return ML
 
-  def DMRG_opt_double_left(self, psi, chi, TR, tol=None):
+  def DMRG_opt_double_left(self, psi, chi, TR, tol=None, eigtol=None):
     # Get starting tensor
     assert TR.site == 2
     M0 = psi.getTR(0).contract(psi.getTR(1),'r-l;b>bl;b>br,~')
@@ -475,7 +475,8 @@ class MPO(MPOgeneric):
       Heff = Heff.asdense(inprefix='t',outprefix='')
       w,v = Heff.eig('bl-tbl,br-tbr,r-tr')
     else:
-      w,v = Heff.eigs(keig,which='SA',guess=M0)
+      kw = dict(tol=eigtol) if eigtol is not None else {}
+      w,v = Heff.eigs(keig,which='SA',guess=M0,**kw)
     # Get two-site ``matrix''; use SVD for true result
     ML,s,MR = v[np.argmin(w)].svd('bl|r,l|br,r',chi=chi,tolerance=tol)
     ML = ML.renamed('bl-b')
@@ -507,7 +508,7 @@ class MPO(MPOgeneric):
     psi.setTR(MR,n+1,unitary=True)
     psi.setschmidt(s/np.linalg.norm(s), n)
 
-  def DMRGsweep_single(self, psi, TRs, tol=None):
+  def DMRGsweep_single(self, psi, TRs, tol=None, eigtol=None):
     # Start on left side
     mat = self.DMRG_opt_single_left(psi, TRs.pop(0), tol)
     TLs = []
@@ -522,7 +523,7 @@ class MPO(MPOgeneric):
       elif config.verbose >= 3:
         print(f'single-update at site',n,'->')
       TLs.append(TL)
-      mat = self.DMRG_opt_single(psi, n, TL, TRs.pop(0), True, mat, None, tol)
+      mat = self.DMRG_opt_single(psi, n, TL, TRs.pop(0), True, mat, None, tol, eigtol)
       TL = TL.right()
       # -- T -- => -- T -- s(new) -- gauge unitary -- s(old)^-1 --
       gauge = mat.diag_mult('l',psi.getschmidt(n))
@@ -553,7 +554,7 @@ class MPO(MPOgeneric):
       psi.printcanon() #DEBUG
     return TRs
 
-  def DMRGsweep_double(self, psi, chi, tol=None):
+  def DMRGsweep_double(self, psi, chi, tol=None, eigtol=None):
     # Should start out as canonical
     # Get right transfer matrices before starting
     if config.verbose >= config.VDEBUG:
@@ -570,7 +571,7 @@ class MPO(MPOgeneric):
         print(f'site {n}/{n+1}, transfers {len(TLs)} .. {len(TRs)}, schmidt rank {len(psi._schmidt[n])}')
       elif config.verbose >= 2:
         print(f'double update at sites {n}->{n+1}')
-      self.DMRG_opt_double(psi, n, chi, TL, TRs.pop(0), None, True, tol)
+      self.DMRG_opt_double(psi, n, chi, TL, TRs.pop(0), None, True, tol, eigtol)
       TL = TL.right()
     # Optimize on right side
     self.DMRG_opt_double_right(psi, chi, TL, tol)
@@ -583,7 +584,7 @@ class MPO(MPOgeneric):
       elif config.verbose >= 2:
         print(f'double update at sites {n}<-{n+1}')
       TRs.insert(0,TR)
-      self.DMRG_opt_double(psi, n, chi, TLs.pop(), TR, None, False, tol)
+      self.DMRG_opt_double(psi, n, chi, TLs.pop(), TR, None, False, tol, eigtol)
       TR = TR.left()
     self.DMRG_opt_double_left(psi, chi, TR, tol)
     TRs.insert(0,TR)
@@ -591,6 +592,7 @@ class MPO(MPOgeneric):
 
   def do_dmrg(self, psi0, chi, Edelta=1e-10, delta2=1e-8,ncanon=10,ncanon2=10,
               nsweep=1000,nsweep2=100,tol=1e-12,tol1=None,tol0=1e-12,Eshift=0,
+              eigtol=None, eigtol_rel=None,
               transfinit=100,savefile=None,saveprefix=None,cont=False):
     # Instead of alternating single + double update perform double update
     # until reaching threshold delta2 (or nsweep2 iterations) then
@@ -604,8 +606,7 @@ class MPO(MPOgeneric):
       chis,chi = chi,chi[0]
     else:
       chis = [chi]
-    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,0,0)
-    # TODO allow adjustment of nsweeps, deltas based on chi
+    nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,eigtol,eigtol_rel,i1,i2 = chidependent(chis,nsweep,nsweep2,Edelta,delta2,ncanon,ncanon2,tol,tol1,eigtol,eigtol_rel,0,0)
     ic0 = 0
     sweep = 0
     if savefile and cont and os.path.isfile(savefile):
@@ -658,6 +659,7 @@ class MPO(MPOgeneric):
     E = self.expv(psi)
     for ic,chi in enumerate(chis[ic0:],start=ic0):
       print(f'{chi=:>3} (#{ic})')
+      etol = eigtol[chi] if (eigtol_rel[chi] is None) else None
       for niter in range(i2[chi],nsweep2[chi]):
         # Perform two-site DMRG
         if config.haltsig:
@@ -665,8 +667,10 @@ class MPO(MPOgeneric):
           import sys
           sys.exit()
         E0 = E
-        TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi])
+        TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi],eigtol=etol)
         E = TRs[0].left().left(terminal=True)
+        if eigtol_rel[chi]:
+          etol = eigtol_rel[chi]*abs(E-E0)
         if config.verbose or (niter%ncanon2[chi] == 0):
           print(f'    \t{np.real(E-E0)}')
         #if (niter+1)%ncanon2 == 0: #TODO
@@ -695,6 +699,8 @@ class MPO(MPOgeneric):
           TRs = self.right_transfer(psi, 1, collect=True)
         TRs = self.DMRGsweep_single(psi, TRs)
         E = np.real(TRs[0].left(terminal=True))
+        if eigtol_rel[chi]:
+          etol = eigtol_rel[chi]*abs(E-E0)
         if config.verbose >= config.VDEBUG:
           print(f'[{niter}] (E={E+Eshift:0.3f}, norm {np.real(psi.normsq()):0.3f})=>{np.real(E/psi.normsq())} or {np.real(self.expv(psi)/psi.normsq())}')
         elif config.verbose or (niter%ncanon[chi] == 0):
