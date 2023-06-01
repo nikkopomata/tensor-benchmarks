@@ -271,13 +271,13 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
               f'({abs(1-w[1]/w[0]):0.2g} versus {eigs_kw["tol"]:0.2g}')
           # Fall back to explicit
           M = self.compute_dense_matrix()
-        if vecs:
-          rv = _eig_vec_process(M, herm, False, None, False, None)
-          rv = rv[:2]
-        elif herm:
-          return linalg.eigvalsh(M)
-        else:
-          return linalg.eigvals(M)
+          if vecs:
+            rv = _eig_vec_process(M, herm, False, None, False, None)
+            rv = rv[:2]
+          elif herm:
+            return linalg.eigvalsh(M)
+          else:
+            return linalg.eigvals(M)
       if not vecs:
         return rv
     w, vs = rv

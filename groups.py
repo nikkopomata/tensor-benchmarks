@@ -1075,7 +1075,6 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
     return self.__class__(decomp)
 
 
-
 class DerivedTypeReconstructor:
   """Callable to provide to pickler for GroupDerivedType
   Ensure that class is (re)-constructed before re-initializing objects"""

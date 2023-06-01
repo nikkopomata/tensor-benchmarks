@@ -1477,6 +1477,41 @@ class Tensor:
     space1 = self._spaces[:ii] + self._spaces[ii+1:] + (self._spaces[ii],)
     return self._tensorfactory(T1, idx1, space1)
 
+  def truncate_bond(self, ll, idx_bool, V=None):
+    """Truncate index ll according to boolean index array provided
+    Optionally provide new vector space specification V
+      (or dual if ll has *)
+    ll may be comma-separated list if multiple indices are to be identically
+      truncated"""
+    # TODO test options
+    V0 = None
+    spaces = list(self._spaces)
+    T = self._T
+    for llsub in ll.split(','):
+      # Get index
+      if '*' in llsub:
+        l = llsub[:-1]
+        c = True
+      else:
+        l = llsub
+        c = False
+      if l not in self._idxs:
+        raise KeyError('unrecognized or invalid index '+l)
+      i = self._idxs.index(l)
+      # Check vector space if multiple
+      if V0 is not None:
+        if (c and not (spaces[i]^V0)) or (not c and not (spaces[i]==V0)):
+          raise ValueError('Vector spaces do not match across indices')
+      else:
+        V0 = spaces[i] if not c else spaces[i].dual()
+      # Truncate tensor
+      T = T[i*(slice(None),) + (idx_bool,Ellipsis)]
+      # Truncate vector space
+      if V is None:
+        V = V0.trim(idx_bool)
+      spaces[i] = V.dual() if c else V
+    return self._tensorfactory(T, self._idxs, spaces)
+
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,
       mat=False, discard=False, zero_tol=None, reverse=False, **kw_args):

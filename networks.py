@@ -946,7 +946,7 @@ class Network:
       return
     tenl = tuple(sorted(tensors))
     if config.memcap:
-      memcap = config.memcap//config.memratio
+      memcap = int(config.memcap//config.memratio)
     else:
       memcap = None
     stepexp = []

@@ -1,5 +1,5 @@
 import quantrada
-from quantrada import tensors, networks, operators, links, config
+from quantrada import tensors, networks, operators, links, config, invariant
 from copy import copy
 import numpy as np
 from numbers import Number
@@ -192,6 +192,21 @@ class MPS(MPSgeneric):
         'br-l,q-b;~;r>br*')
     T = T.contract(self._matrices[-1],'tr-l;~;b>q')
     return T.contract(phi._matrices[-1],'br-l,q-b*')
+
+  def truncate(self, cutoff_tol, verbose=False):
+    # Truncate bonds to specified value of Schmidt coefficients
+    # Only bother with interior sites
+    # TODO fix
+    for l in range(1,self.N-2):
+      aschmidt = np.array(self._schmidt[l])
+      keep = aschmidt > cutoff_tol
+      if not np.all(keep):
+        if verbose:
+          print(f'{l}: {len(keep)}->{sum(keep)}')
+        T1 = self._matrices[l].truncate_bond('r', keep)
+        self._matrices[l] = T1
+        self._matrices[l+1] = self._matrices[l+1].truncate_bond('l*',keep,V=T1.getspace('r'))
+        self._schmidt[l] = list(aschmidt[keep])
    
   def tebd_left(self, U, chi):
     ML = self.getTR(0)
@@ -666,6 +681,12 @@ class MPO(MPOgeneric):
           print('Exiting due to halt signal...')
           import sys
           sys.exit()
+        if etol is None and eigtol_rel[chi]:
+          # TODO better initial tolerance value 
+          etol = eigtol_rel[chi]*abs(E)
+          if etol < max(Edelta[chi],delta2[chi]):
+            # Presume artificially low initial energy
+            etol = eigtol_rel[chi]
         E0 = E
         TRs = self.DMRGsweep_double(psi,chi,tol=tol[chi],eigtol=etol)
         E = TRs[0].left().left(terminal=True)
