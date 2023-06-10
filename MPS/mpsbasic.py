@@ -45,7 +45,7 @@ def randMPS(indphys, indvirt, N=None):
 
 
 class MPS(MPSgeneric):
-  def __init__(self,Ms,schmidt=None):
+  def __init__(self,Ms,schmidt=None,tol=1e-15):
     self._matrices = list(Ms)
     N = len(Ms)
     self._Nsites = N
@@ -61,7 +61,7 @@ class MPS(MPSgeneric):
           raise ValueError(f'Failure in bond matching at sites {n}-{n+1}')
         d = Ms[n].dshape['r']
         self._schmidt.append(d*[1/d])
-      self.restore_canonical()
+      self.restore_canonical(tol=tol)
 
   def issite(self, n):
     return (n >= 0) and (n < self._Nsites)
@@ -200,6 +200,24 @@ class MPS(MPSgeneric):
     for l in range(1,self.N-2):
       aschmidt = np.array(self._schmidt[l])
       keep = aschmidt > cutoff_tol
+      if not np.all(keep):
+        if verbose:
+          print(f'{l}: {len(keep)}->{sum(keep)}')
+        T1 = self._matrices[l].truncate_bond('r', keep)
+        self._matrices[l] = T1
+        self._matrices[l+1] = self._matrices[l+1].truncate_bond('l*',keep,V=T1.getspace('r'))
+        self._schmidt[l] = list(aschmidt[keep])
+
+  def truncate_tochi(self, cutoff_chi, verbose=False):
+    # Truncate bonds to specified value of Schmidt coefficients
+    # Only bother with interior sites
+    # TODO fix for nonabelian symmetries
+    for l in range(1,self.N-2):
+      if len(self._schmidt[l]) <= cutoff_chi:
+        continue
+      aschmidt = np.array(self._schmidt[l])
+      cutoff = sorted(aschmidt)[-cutoff_chi]
+      keep = aschmidt >= cutoff
       if not np.all(keep):
         if verbose:
           print(f'{l}: {len(keep)}->{sum(keep)}')
