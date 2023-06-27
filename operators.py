@@ -36,16 +36,14 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     return self._fuse_out._idxs
 
   def _matvec(self, v):
-    if config.lin_iter_verbose:
-      print('Iteration #%d'%self.iters,flush=config.flush)
+    config.linalg_log.log(15, 'Iteration #%d', self.iters)
     self.iters += 1
     T0 = self.tensor_in(v)
     T1 = self.tensor_action(T0)
     return self.vector_out(T1)
 
   def _adjoint(self, v):
-    if config.lin_iter_verbose:
-      print('Iteration (adjoint) #%d'%self.iters,flush=config.flush)
+    config.linalg_log.log(15, 'Iteration (adjoint) #%d', self.iters)
     self.iters += 1
     T0 = self.tensor_adjoint_in(v)
     T1 = self.adjoint_tensor_action(T0)
@@ -248,8 +246,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
         return linalg.eigvals(M)
     else:
       # Do the actual sparse computation
-      if config.lin_iter_verbose:
-        print('Diagonalizing operator with effective dimension',self._fuse_out.effective_dim)
+      config.linalg_log.log(18, 'Diagonalizing operator with effective dimension %d',self._fuse_out.effective_dim)
       if isinstance(guess, Tensor):
         self._fuse_in.matchtensor(guess)
         guess = self.vector_out(guess)
@@ -265,10 +262,8 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       if 'tol' in eigs_kw and eigs_kw['tol'] and k>1:
         # Check difference in eigenvalues is outside tolerance
         w = rv[0] if vecs else rv
-        if abs(w[0] - w[1]) >= abs(w[0])*eigs_kw['tol']:
-          if config.lin_iter_verbose:
-            print('Eigenvalue difference outside tolerance '
-              f'({abs(1-w[1]/w[0]):0.2g} versus {eigs_kw["tol"]:0.2g}')
+        if abs(w[0] - w[1]) < abs(w[0])*eigs_kw['tol']:
+          config.linalg_log.warn('Eigenvalue difference outside tolerance: %0.2g versus %0.2g', abs(1-w[1]/w[0]), eigs_kw['tol'])
           # Fall back to explicit
           M = self.compute_dense_matrix()
           if vecs:

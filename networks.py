@@ -992,6 +992,7 @@ class Network:
     mem = self.memexpense(tree,reorder=True)
     self._tree = tree
     if config.opt_verbose >= 1:
+      # TODO work into logging
       print(f'Optimized with {exp:.0e} steps, memory',end=' ')
       memk = mem/2**14
       if memk < 1000:

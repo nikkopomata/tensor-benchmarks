@@ -564,7 +564,7 @@ class MPSgeneric(ABC):
         # Contract with intermediate sites
         T = self.getlefttransfer(transf, x0-1, 'l') 
         for x in range(x0,xs[iO+1]):
-          T = T.right(fparity=(parities[x%self.N]) if partot else A)
+          T = T.right(fparity=(parities[x%self.N] if partot else None))
         transf = T.T
       else:
         assert x0 == xs[iO+1]

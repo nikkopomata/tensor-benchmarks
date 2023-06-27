@@ -1,5 +1,4 @@
 from . import config
-import warnings
 
 if config.STACK == 0:
   import numpy as np
@@ -14,14 +13,13 @@ def safesvd(matrix):
     try:
       U, s, Vd = linalg.svd(matrix, full_matrices=False)
     except linalg.LinAlgError:
-      if i+1<config.svd_retry and config.linalg_verbose:
-        print('SVD did not converge, retrying (#%d)'%(i+1))
+      if i+1<config.svd_retry:
+        config.linalg_log.warn('SVD did not converge, retrying (#%d)',i+1)
     else:
       return U, s, Vd
   global numsvd
   numsvd += 1
-  if config.linalg_verbose:
-    print('SVD did not converge, manually computing SVD (#%d)' % numsvd)
+  config.linalg_log.warn('SVD did not converge, manually computing SVD (#%d)', numsvd)
   try:
     d0 = matrix.shape[0]
     d1 = matrix.shape[1]
@@ -43,8 +41,7 @@ def safesvd(matrix):
       V[:,k] = V[:,k] / linalg.norm(V[:,k])
     return U, s, V.conj().T
   except:
-    if config.linalg_verbose:
-      print('Stable method failed; using unstable method')
+    config.linalg_log.warn('Stable method failed; using unstable method')
     flip = (matrix.shape[0] < matrix.shape[1])
     if flip:
       matrix = matrix.T
