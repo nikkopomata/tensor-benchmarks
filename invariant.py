@@ -103,6 +103,7 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
     MR = repright.dim
     iblock = 0
     iL = 0
+    block1d = True
     for kl,nl in repleft._decomp:
       dl = cls.group.dim(kl)
       iR = 0
@@ -121,6 +122,7 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
           k = fo[0][0]
           # May, in this case, require charge-conjugation
           if cls.group.indicate(k) == -2:
+            block1d = False
             k = cls.group.dual(k)
             W = cls.group.S(k).T.conj()
           else:
@@ -129,10 +131,12 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
           idxO[k].extend(range(iblock,iblock+nl*nr*dl*dr))
           ffin[k] += nl*nr
         else:
+          block1d = False
           W = []
           ib = iblock
           for k,n in fo:
             do = cls.group.dim(k)
+            assert Wo[k].shape == (dl,dr,n,do)
             W.append(np.moveaxis(Wo[k],2,3).reshape((dl*dr,do*n)).T)
             # Put each copy with the appropriate irrep
             for io in range(nl*nr):
@@ -146,17 +150,27 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
       iL += dl*nl
     MO = ML*MR
     # Input permutation
+    config.linalg_log.log(5,'Constructing permutation matrix for %dx%d->%d Clebsch-Gordan fusion', ML,MR,MO)
     permI = sparse.csr_matrix((MO*[1],idxI,range(MO+1)),shape=(MO,MO),dtype=int)
-    # Block-diagonal Clebsch-Gordan matrix
-    W = sparse.block_diag(CGblocks, format='csr')
+    config.linalg_log.log(5,'Constructing ``output permutation'' matrix')
+    # Output permutation
     idxOl = []
     fo = []
     for k in idxO:
       fo.append((k,ffin[k]))
       idxOl.extend(idxO[k])
-    # Output permutation
     permO=sparse.csr_matrix((MO*[1],idxOl,range(MO+1)),shape=(MO,MO),dtype=int)
-    return cls.group.SumRep(fo), permO.dot(W).dot(permI)
+    if block1d:
+      config.linalg_log.log(5, 'Skipping block-diagonal matrix') 
+      matfinal = permO.dot(permI)
+    else:
+      config.linalg_log.log(5,'Constructing block-diagonal Clebsch-Gordan matrix')
+      # Block-diagonal Clebsch-Gordan matrix
+      W = sparse.block_diag(CGblocks, format='csr')
+      config.linalg_log.log(5, 'Producing product matrix') 
+      matfinal = permO.dot(W).dot(permI)
+    config.linalg_log.log(5, 'CG matrix completed')
+    return cls.group.SumRep(fo), matfinal
   
   def conj(self):
     if self._CGmat is None:

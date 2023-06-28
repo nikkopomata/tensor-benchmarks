@@ -1174,13 +1174,12 @@ class Tensor:
     try:
       T = np.tensordot(self._T,arr2,[i1,i2])
     except MemoryError as me:
-      import sys
       config.opt_log.warn('Handling MemoryError in Tensor._do_contract...')
       config.opt_log.debug('dimensions %s x %s', copy(self.shape), copy(T2.shape))
       config.opt_log.info('%dx%d->%d',self.numel,T2.numel,
         functools.reduce(int.__mul__,[v.dim for v in vout1+vout2]))
       import gc
-      config.opt_log.info('Total elements of tensors in garbage-collection generations:',file=sys.stderr)
+      config.opt_log.info('Total elements of tensors in garbage-collection generations:')
       for gcgen in range(3):
         nten = 0
         numel = 0
@@ -1192,7 +1191,6 @@ class Tensor:
       config.opt_log.warn('Performing collection...')
       gc.collect()
       config.opt_log.info('Updated element counts:')
-      print('Updated element counts:',file=sys.stderr)
       for gcgen in range(3):
         nten = 0
         numel = 0
