@@ -34,19 +34,19 @@ lin_iter_verbose = 0 # Verbosity for iterative linear-algebraic functions
 VDEBUG = 5 # Debugging verbosity level
 verbose = 1 # General verbosity
 opt_verbose = 0 # Verbosity for optimization routines
-import logging
+import logging,sys
 # TODO integrate existing messaging into logging
 logger = logging.getLogger('tensorlog')
 # Separate log for messages intended to go directly to stdout
 streamlog = logger.getChild('stdout')
-streamhandler = logging.StreamHandler()
+streamhandler = logging.StreamHandler(sys.stdout)
 streamhandler.setLevel(logging.INFO)
 streamhandler.setFormatter(logging.Formatter('%(message)s'))
 streamlog.addHandler(streamhandler)
 linalg_log = logger.getChild('linalg')
 opt_log = logger.getChild('optimization')
 logger.setLevel(logging.DEBUG)
-stdout_handler = logging.StreamHandler()
+stdout_handler = logging.StreamHandler(sys.stderr)
 stdout_handler.setLevel(logging.ERROR)
 stdout_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
 logger.addHandler(stdout_handler)

@@ -22,6 +22,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
     # Check existing
     filename = (file_prefix+'.p') if savefile=='auto' else savefile
     if os.path.isfile(filename):
+      config.streamlog.warn('Reloading manager from %s',filename)
       Mngr = pickle.load(open(filename,'rb'))
       if isinstance(chis, int):
         chis = [chis]
@@ -35,7 +36,11 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
         # Additionally reset general settings
         dmrg_kw.pop('psi0',None)
         Mngr.resetsettings(dmrg_kw)
-
+      if Mngr.filename != filename:
+        config.streamlog.warn('Updating save destination from %s to %s',
+          Mngr.filename, filename)
+        Mngr.filename = filename
+        Mngr.saveprefix = file_prefix
       return Mngr
   return DMRGManager(Hamiltonian, chis, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
@@ -258,8 +263,10 @@ class DMRGManager:
       if isinstance(rv,tuple):
         rv, *sv = rv
       if isinstance(rv,DMRGManager):
+        self.logger.log(15, 'Loaded from manager')
         self.psi = rv.psi
       else:
+        self.logger.log(15, 'Loaded as state')
         assert isinstance(rv, MPS)
         self.psi = rv
     elif isinstance(self.psi,MPS):
@@ -300,7 +307,7 @@ class DMRGManager:
     self.getE()
     Ediff = self.E-self.E0
     self.logger.log(20, '[%s]  energy diff %s', niter, Ediff)
-    config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10g',niter,Ediff,self.E)
+    config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10f',niter,Ediff,self.E)
     return abs(Ediff)
 
   def saveschmidt(self):
@@ -342,7 +349,7 @@ class DMRGManager:
     self.logger.log(20, '[%s] schmidt diff %s', niter, Ldiff)
     self.getE()
     self.logger.log(20, '[%s]  energy diff %s', niter, self.E-self.E0)
-    config.streamlog.log(30,f'[% 4d] %10.4g %+10.4g E=%0.10g',niter,Ldiff,self.E-self.E0,self.E)
+    config.streamlog.log(30,f'[% 4d] %10.4g %+10.4g E=%0.10f',niter,Ldiff,self.E-self.E0,self.E)
     return Ldiff
 
   def doubleupdateleft(self):

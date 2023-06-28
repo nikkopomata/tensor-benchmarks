@@ -991,20 +991,21 @@ class Network:
         ' limit %0.2fGiB'%(np.dtype(config.FIELD).itemsize*memcap/2**30))
     mem = self.memexpense(tree,reorder=True)
     self._tree = tree
-    if config.opt_verbose >= 1:
-      # TODO work into logging
-      print(f'Optimized with {exp:.0e} steps, memory',end=' ')
-      memk = mem/2**14
-      if memk < 1000:
-        print(f'{round(memk):d}KB')
+    #if config.opt_verbose >= 1:
+    # TODO work into logging
+    config.opt_log.log(20,'Optimized with %.0e steps', exp)
+    memk = mem/2**14
+    if memk < 1000:
+      config.opt_log.log(20,'memory %dKB',round(memk))
+    else:
+      memm = memk/2**10
+      if memm < 1000:
+        config.opt_log.log(20,f'memory %0.1fMB',memm)
+      elif memm < 2**20:
+        config.opt_log.log(20,f'memory {memm/2**10:0.1f}GB',memm/2**10)
       else:
-        memm = memk/2**10
-        if memm < 1000:
-          print(f'{memm:0.1f}MB')
-        elif memm < 2**20:
-          print(f'{memm/2**10:0.1f}GB')
-        else:
-          print(f'{memm/2**20:0.1f}TB (!!!)')
+        config.opt_log.critical(f'memory {memm/2**20:0.1f}TB (!!!)',memm/2**20)
+    if config.opt_verbose >= 1:
       tree.pprint()
     
   def __optimize_child_simple(self, tlist, bonddim, resdict, expmin):

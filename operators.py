@@ -256,9 +256,11 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       if herm:
         rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
           v0=guess,**eigs_kw)
+        config.linalg_log.log(13,'Lanczos diagonalization complete')
       else:
         rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
           v0=guess,**eigs_kw)
+        config.linalg_log.log(13,'Arnoldi diagonalization complete')
       if 'tol' in eigs_kw and eigs_kw['tol'] and k>1:
         # Check difference in eigenvalues is outside tolerance
         w = rv[0] if vecs else rv
