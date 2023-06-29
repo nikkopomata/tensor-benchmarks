@@ -7,7 +7,7 @@ import numpy as np
 from copy import copy,deepcopy
 
 def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
-    override=True, override_chis=True, **dmrg_kw):
+    override=True, override_chis=True, resume_from_old=False, **dmrg_kw):
   """Initialize optimization manager
   (unpickle if saved, create otherwise)
   'override' tells manager to replace settings if different in restored manager
@@ -17,15 +17,37 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
     If current bond dimension might not be in list, can pass
       'lower' to make the algorithm select the next-lowest, or
       'higher' to make the algorithm select the next-highest
+  'resume_from_old' indicates that the filename may point to a saved status
+    consisting of (psi, (chi, single_or_double, niter))
   remaining arguments  as in DMRGManager()"""
   if savefile and (savefile != 'auto' or file_prefix):
     # Check existing
     filename = (file_prefix+'.p') if savefile=='auto' else savefile
     if os.path.isfile(filename):
-      config.streamlog.warn('Reloading manager from %s',filename)
-      Mngr = pickle.load(open(filename,'rb'))
       if isinstance(chis, int):
         chis = [chis]
+      config.streamlog.warn('Reloading manager from %s',filename)
+      Mngr = pickle.load(open(filename,'rb'))
+      if resume_from_old and isinstance(Mngr, tuple):
+        config.streamlog.info('Converting old savepoint')
+        psi,(chi,ds,niter) = Mngr
+        assert chi in chis
+        Mngr = DMRGManager(Hamiltonian, chis, file_prefix=file_prefix,
+          savefile=savefile, **dmrg_kw)
+        Mngr.restorecanonical()
+        idx = chis.index(chi)
+        Mngr.setchi(idx, chi)
+        Mngr.supervisors = 'paused'
+        Mngr.supstatus = [(chi,ds),(niter,)]
+        if ds == 1:
+          Mngr.getrighttransfers(1)
+          Mngr.suplabels = ['base','single']
+        else:
+          Mngr.saveschmidt()
+          Mngr.getrighttransfers(2)
+          Mngr.suplabels = ['base','double']
+        Mngr.getE()
+        return Mngr
       if override_chis:
         # Reset bond dimension list
         useas = override_chis if isinstance(override_chis,str) else None
