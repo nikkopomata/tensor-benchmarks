@@ -7,7 +7,7 @@ from numbers import Number
 from abc import ABC, abstractmethod
 from itertools import compress
 from collections import defaultdict
-import os.path, pickle,sys, re
+import os.path, pickle,sys,uuid, re
 import traceback
 
 keig = 5
@@ -1034,7 +1034,6 @@ class TransferMatrix(ABC):
     self.psi = psi
     self.site = site
     self.operators = Ops
-    self.T = None
     if len(Ops) == 1:
       self.opidx = ('c',)
     else:
@@ -1042,6 +1041,11 @@ class TransferMatrix(ABC):
     assert lr in {'l','r'}
     self._schmidtdir = lr
     self._strict = False
+    if 'manager' in kw_args:
+      self.manager = kw_args['manager']
+      self.id = uuid.uuid1()
+    else:
+      self.T = None
 
   #TODO option for bra != ket
 
@@ -1067,8 +1071,14 @@ class TransferMatrix(ABC):
   def depth(self):
     return len(self.operators)
 
+  @abstractmethod
+  def initnext(self):
+    # Initialize next transfer vector (without tensor)
+    pass
+
 class LeftTransfer(TransferMatrix):
   def compute(self, TL, fparity=None):
+    config.logger.debug('Applying transfer matrix to left of site %d',self.site)
     # TODO fermion parity for right
     assert set(self.idxs) == TL.idxset
     if self._strict and not self.psi._leftcanon[self.site%self.psi.N]:
@@ -1093,7 +1103,7 @@ class LeftTransfer(TransferMatrix):
     assert self._schmidtdir == 'l'
     self._strict = True
 
-  def right(self, terminal=False, fparity=None):
+  def right(self, terminal=False, fparity=None, unstrict=False):
     if terminal:
       assert self.site == self.psi.N-2
       if self._schmidtdir == 'l':
@@ -1107,24 +1117,30 @@ class LeftTransfer(TransferMatrix):
       if fparity is not None:
         psiT = psiT.diag_mult('b',fparity)
       return T.contract(psiT,'b-l,q-b*')
-    Tnext = LeftTransfer(self.psi, self.site+1, self._schmidtdir, *self.operators)
-    Tnext._strict = self._strict
+    Tnext = self.initnext()
+    if not unstrict:
+      Tnext._strict = self._strict
     Tnext.compute(self.T, fparity=fparity)
     return Tnext
 
-  def moveby(self, dn, collect=False):
+  def initnext(self):
+    return LeftTransfer(self.psi,self.site+1,self._schmidtdir, *self.operators)
+
+  def moveby(self, dn, collect=False, unstrict=False):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
       self.psi.printcanon()
     Tl = self
     if collect:
       Ts = [self]
       for n in range(dn):
-        Tl = Tl.right()
+        Tl = Tl.right(unstrict=unstrict)
         Ts.append(Tl)
       return Ts
     else:
       for n in range(dn):
-        Tl = Tl.right()
+        Tl = Tl.right(unstrict=unstrict)
+        # Temporary--no need to keep
+        Tl.discard = True
       return Tl
 
   def Ereduce(self):
@@ -1164,9 +1180,29 @@ class LeftTransfer(TransferMatrix):
     assert self._schmidtdir == 'l'
     self.T = self.T.mat_mult('t-l',M).mat_mult('b-l*',M)
 
+class LeftTransferManaged(LeftTransfer):
+  def initnext(self):
+    return LeftTransferManaged(self.psi,self.site+1,self._schmidtdir,
+      *self.operators, manager=self.manager)
+
+  @property
+  def T(self):
+    with self.manager.shelfcontext() as shelf:
+      return shelf[self.id.hex]
+
+  @T.setter
+  def T(self, value):
+    with self.manager.shelfcontext() as shelf:
+      shelf[self.id.hex] = value
+
+  def __del__(self):
+    if hasattr(self,'discard') and self.discard == True:
+      with self.manager.shelfcontext() as shelf:
+        del shelf[self.id.hex]
 
 class RightTransfer(TransferMatrix):
   def compute(self, TR):
+    config.logger.debug('Applying transfer matrix to right of site %d',self.site)
     assert set(self.idxs) == TR.idxset
     if self._strict and not self.psi._rightcanon[self.site%self.psi.N]:
       raise ValueError(f'strictly-enforced transfer matrix requires right-canonical: site {self.site%self.psi.N}')
@@ -1188,7 +1224,7 @@ class RightTransfer(TransferMatrix):
     assert self._schmidtdir == 'r'
     self._strict = True
 
-  def left(self, terminal=False):
+  def left(self, terminal=False, unstrict=False):
     # terminal: state and/or operators are finite, yield number or lower-rank
     # transfer matrix
     # TODO case of one or more operators terminating
@@ -1203,24 +1239,30 @@ class RightTransfer(TransferMatrix):
         T = T.contract(self.operators[n].getT(self.site-1),
           f'{self.opidx[n]}-r,q-t;~;b>q')
       return T.contract(psiT,'b-r,q-b*')
-    Tnext = RightTransfer(self.psi, self.site-1, self._schmidtdir, *self.operators)
-    Tnext._strict = self._strict
+    Tnext = self.initnext()
+    if not unstrict:
+      Tnext._strict = self._strict
     Tnext.compute(self.T)
     return Tnext
 
-  def moveby(self, dn, collect=False):
+  def initnext(self):
+    return RightTransfer(self.psi,self.site-1,self._schmidtdir, *self.operators)
+
+  def moveby(self, dn, collect=False, unstrict=False):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
       self.psi.printcanon()
     Tl = self
     if collect:
       Ts = [self]
       for n in range(dn):
-        Tl = Tl.left()
+        Tl = Tl.left(unstrict=unstrict)
         Ts.append(Tl)
       return Ts
     else:
       for n in range(dn):
-        Tl = Tl.left()
+        Tl = Tl.left(unstrict=unstrict)
+        # Temporary--no need to keep
+        Tl.discard = True
       return Tl
 
   def Ereduce(self):
@@ -1259,3 +1301,23 @@ class RightTransfer(TransferMatrix):
     # TODO conditions other than dir r, possibly other index names
     assert self._schmidtdir == 'r'
     self.T = self.T.mat_mult('t-r',M).mat_mult('b-r*',M)
+
+class RightTransferManaged(RightTransfer):
+  def initnext(self):
+    return RightTransferManaged(self.psi,self.site-1,self._schmidtdir,
+      *self.operators, manager=self.manager)
+
+  @property
+  def T(self):
+    with self.manager.shelfcontext() as shelf:
+      return shelf[self.id.hex]
+
+  @T.setter
+  def T(self, value):
+    with self.manager.shelfcontext() as shelf:
+      shelf[self.id.hex] = value
+
+  def __del__(self):
+    if hasattr(self,'discard') and self.discard == True:
+      with self.manager.shelfcontext() as shelf:
+        del shelf[self.id.hex]

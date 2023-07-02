@@ -136,7 +136,6 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
           ib = iblock
           for k,n in fo:
             do = cls.group.dim(k)
-            assert Wo[k].shape == (dl,dr,n,do)
             W.append(np.moveaxis(Wo[k],2,3).reshape((dl*dr,do*n)).T)
             # Put each copy with the appropriate irrep
             for io in range(nl*nr):

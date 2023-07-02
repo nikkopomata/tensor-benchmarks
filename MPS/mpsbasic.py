@@ -427,8 +427,11 @@ class MPO(MPOgeneric):
     Ms.append(M)
     return MPO(Ms)
 
-  def getboundarytransfleft(self, psi, lr='l', strict=True):
-    T = LeftTransfer(psi, 0, lr, self)
+  def getboundarytransfleft(self, psi, lr='l', strict=True, manager=None):
+    if manager:
+      T = LeftTransferManaged(psi, 0, lr, self, manager=manager)
+    else:
+      T = LeftTransfer(psi, 0, lr, self)
     if lr == 'r':
       T0 = psi.getTR(0)
     else:
@@ -440,9 +443,12 @@ class MPO(MPOgeneric):
     T.setvalue(TV)
     return T
   
-  def getboundarytransfright(self, psi, lr='r', strict=True):
+  def getboundarytransfright(self, psi, lr='r', strict=True, manager=None):
     n = self.N-1
-    T = RightTransfer(psi, n, lr, self)
+    if manager:
+      T = RightTransferManaged(psi, n, lr, self, manager=manager)
+    else:
+      T = RightTransfer(psi, n, lr, self)
     if lr == 'l':
       T0 = psi.getTL(n)
     else:
@@ -454,16 +460,16 @@ class MPO(MPOgeneric):
     T.setvalue(TV)
     return T
 
-  def right_transfer(self, psi, n, collect=False, strict=True):
+  def right_transfer(self, psi, n, collect=False, strict=True, manager=None):
     # Transfer matrix of expectation with psi from site n on (inclusive)
-    rts = self.getboundarytransfright(psi,strict=strict).moveby(self.N-1-n,collect=collect)
+    rts = self.getboundarytransfright(psi,strict=strict,manager=manager).moveby(self.N-1-n,collect=collect)
     if collect:
       rts = rts[::-1]
     return rts
 
-  def left_transfer(self, psi, n, collect=False):
+  def left_transfer(self, psi, n, collect=False,manager=None):
     # Transfer matrix of expectation with psi from site n on (inclusive)
-    return self.getboundarytransfleft(psi,strict=strict).moveby(n,collect=collect)
+    return self.getboundarytransfleft(psi,manager=manager).moveby(n,collect=collect)
 
   def expv(self, psi, strict=False):
     T = self.right_transfer(psi, 1, strict=strict)

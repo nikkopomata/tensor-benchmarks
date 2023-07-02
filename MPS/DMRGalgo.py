@@ -1,13 +1,14 @@
 from .mpsbasic import *
 from .. import config
 import os.path
-import pickle
+import pickle,shelve,contextlib
 import logging
 import numpy as np
 from copy import copy,deepcopy
 
 def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
-    override=True, override_chis=True, resume_from_old=False, **dmrg_kw):
+    override=True, override_chis=True, resume_from_old=False, use_shelf=False,
+    **dmrg_kw):
   """Initialize optimization manager
   (unpickle if saved, create otherwise)
   'override' tells manager to replace settings if different in restored manager
@@ -54,15 +55,19 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
         Mngr.resetchis(chis, use_as=useas)
       else:
         assert chis == Mngr.chis
-      if override:
-        # Additionally reset general settings
-        dmrg_kw.pop('psi0',None)
-        Mngr.resetsettings(dmrg_kw)
       if Mngr.filename != filename:
         config.streamlog.warn('Updating save destination from %s to %s',
           Mngr.filename, filename)
         Mngr.filename = filename
         Mngr.saveprefix = file_prefix
+      if override:
+        # Additionally reset general settings
+        dmrg_kw.pop('psi0',None)
+        Mngr.resetsettings(dmrg_kw)
+        if use_shelf:
+          Mngr.setdbon()
+        else:
+          Mngr.setdboff(False)
       return Mngr
   return DMRGManager(Hamiltonian, chis, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
@@ -70,7 +75,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
 class DMRGManager:
   """Optimizer for DMRG"""
   def __init__(self, Hamiltonian, chis, psi0=None,
-              file_prefix=None, savefile='auto',
+              file_prefix=None, savefile='auto', use_shelf=False,
               Edelta=1e-8, schmidtdelta=1e-6,ncanon1=10,ncanon2=10,
               nsweep1=1000,nsweep2=100,tol2=1e-12,tol1=None,tol0=1e-12,
               eigtol=None, eigtol_rel=None):
@@ -102,8 +107,6 @@ class DMRGManager:
     self.N = Hamiltonian.N
     self.chiindex = None
     self.chi = None
-    self.transfLs = []
-    self.transfRs = []
     self.schmidt0 = None
     self.E = None
     self.E0 = None
@@ -114,6 +117,21 @@ class DMRGManager:
       self.filename = (file_prefix+'.p') if savefile=='auto' else savefile
     else:
       self.filename = savefile
+
+    if use_shelf:
+      assert self.filename
+      # Use autosave filename but with extension .db instead of .p
+      self.dbfile = self.filename[:-1]+'db'
+      self.database = None
+      self.shelfopen = False
+    else:
+      # Otherwise just use a dictionary instead
+      self.dbfile = None
+      self.database = {}
+    self.transfLs = []
+    self.transfRs = []
+    self.ntransfL = 0
+    self.ntransfR = 0
     # General (all-bond-dimension) settings
     self.settings_allchi = dict(Edelta=Edelta, schmidtdelta=schmidtdelta,
            ncanon1=ncanon1,ncanon2=ncanon2,nsweep1=nsweep1,nsweep2=nsweep2,
@@ -170,9 +188,65 @@ class DMRGManager:
 
   def __setstate__(self, state):
     self.__dict__.update(state)
+    self._initlog()
+    if 'ntransfR' not in state:
+      self.ntransfR = len(state['transfRs'])
+      self.ntransfL = len(state['transfLs'])
+      self.dbfile = None
+      self.database = {}
+      # Convert to managed
+      for n in range(self.ntransfR):
+        T0 = self.transfRs[n]
+        self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
+          self.H, manager=self)
+        self.transfRs[n].T = T0.T
+      for n in range(self.ntransfL):
+        T0 = self.transfLs[n]
+        self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
+          self.H, manager=self)
+        self.transfLs[n].T = T0.T
+    elif 'database' not in state:
+      # TODO depricate
+      if self.dbfile:
+        # Need to re-load before unloading
+        self.transfRs = []
+        self.transfLs = []
+        self.shelfopen = False
+        self.database = None
+        with shelve.open(self.dbfile) as shelf:
+          if self.ntransfR and (f'{self.N-self.ntransfR}R' not in shelf):
+            self.transfRs = self.H.right_transfer(self.psi,self.N-self.ntransfR,collect=True)
+          else:
+            for n in range(self.N-self.ntransfR,self.N):
+              self.transfRs.append(shelf.pop(f'{n}R'))
+          if self.ntransfL and (f'{self.ntransfL-1}L' not in shelf):
+            self.transfLs = self.H.left_transfer(self.psi,self.ntransfL,collect=True)
+          else:
+            for n in range(self.ntransfL):
+              self.transfLs.append(shelf.pop(f'{n}L'))
+      else:
+        self.database = {}
+      # Convert to managed
+      with self.shelfcontext() as shelf:
+        for n in range(self.ntransfR):
+          T0 = self.transfRs[n]
+          self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
+            self.H, manager=self)
+          self.transfRs[n].T = T0.T
+        for n in range(self.ntransfL):
+          T0 = self.transfLs[n]
+          self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
+            self.H, manager=self)
+          self.transfLs[n].T = T0.T
+    elif self.dbfile:
+      if not os.path.isfile(self.dbfile):
+        self.logger.error('Database file not found, regenerating')
+        self.regenerate()
+      else:
+        self.checkdatabase()
+        
     self.chirules = {}
     self._initfuncs()
-    self._initlog()
     self.supervisors = 'paused'
 
   def resetsettings(self,kw_args):
@@ -215,7 +289,6 @@ class DMRGManager:
       self.supstatus[0] = (self.chi,self.supstatus[0][1])
     if self.supervisors != 'paused' and len(self.supervisors):
       self.supervisors[0] = self.supfunctions['base'](self.chis,self.N,self.settings,self.supstatus[0])
-      
 
   def settingbychi(self, chi, **kw_args):
     if isinstance(chi, int):
@@ -239,17 +312,13 @@ class DMRGManager:
     self.supfunctions[name] = func
 
   def getE(self):
-    if not self.transfRs:
+    if self.ntransfR == 0:
       assert not self.E
       self.E = np.real(self.H.expv(self.psi))
       self.logger.log(25,'Initial energy %s',self.E)
       return self.E
-    # TODO better solution for strictness
-    tR0 = self.transfRs[0]
-    strict = tR0._strict
-    tR0._strict = False
-    transf = tR0.moveby(self.N-len(self.transfRs)-1)
-    tR0._strict = strict
+    tR0 = self.gettransfR(self.N-self.ntransfR)
+    transf = tR0.moveby(self.N-self.ntransfR-1,unstrict=True)
     self.E0,self.E = self.E,np.real(transf.left(terminal=True))
     self.logger.log(20,'Energy calculated as %s',self.E) 
     if self.E0 is not None and self.settings['eigtol_rel']:
@@ -316,8 +385,212 @@ class DMRGManager:
   
   def getrighttransfers(self, n0):
     self.logger.log(10, 'Collecting right transfer matrices')
-    self.transfRs = self.H.right_transfer(self.psi, n0, collect=True)
+    for tR in self.transfRs:
+      tR.discard = True
+    for tL in self.transfLs:
+      tL.discard = True
+    self.transfRs = self.H.right_transfer(self.psi, n0, collect=True, manager=self)
     self.transfLs = []
+    self.ntransfR = len(self.transfRs)
+    self.ntransfL = 0
+
+  @contextlib.contextmanager
+  def shelfcontext(self):
+    # Open shelf context manager if using, otherwise imitate nullcontext
+    if self.dbfile and not self.shelfopen:
+      try:
+        self.database = shelve.open(self.dbfile)
+        self.shelfopen = True
+        yield self.database
+      finally:
+        self.database.close()
+        self.database = None
+        self.shelfopen = False
+    else:
+      try:
+        yield self.database
+      finally:
+        pass
+
+  def setdbon(self):
+    dbfile = self.filename[:-1]+'db'
+    if not self.dbfile:
+      self.logger.warn('Transferring transfer tensors to shelf...')
+      # Create database
+      with shelve.open(dbfile) as shelf:
+        for k in set(self.database):
+          shelf[k] = self.database.pop(k)
+      self.database = None
+      self.shelfopen = False
+      self.dbfile = dbfile
+      self.logger.debug('Shelf created at %s',dbfile)
+      self.save()
+    elif dbfile != self.dbfile:
+      self.logger.info('Copying shelf from %s to %s',dbfile,self.dbfile)
+      # Move database
+      try:
+        import shutil
+        shutil.copy2(self.dbfile,dbfile)
+        self.dbfile = dbfile
+      except FileNotFoundError:
+        self.dbfile = dbfile
+        self.logger.warn('Shelf file not found, repopulating %d left and '
+          '%d right transfer vectors', self.ntransfL,self.ntransfR)
+        self.regenerate()
+      self.save()
+    else:
+      self.logger.debug('Shelf already in place')
+
+  def regenerate(self):
+    with self.shelfcontext() as shelf:
+      if self.ntransfR:
+        # Start with boundary 
+        Ar = self.psi.getTc(self.N-1)
+        TV = self.H.getT(self.N-1).contract(Ar,'t-b;l>c,b>b;l>t')
+        TV = TV.contract(Ar,'b-b;~;l>b*')
+        self.transfRs[-1].T = TV
+        for nr in range(self.ntransfR-2,-1,-1):
+          self.transfRs[nr].compute(self.transfRs[nr+1].T)
+      if self.ntransfL:
+        Al = self.psi.getTc(0)
+        TV = self.H.getT(0).contract(Al, 't-b;r>c,b>b;r>t')
+        TV = TV.contract(Al, 'b-b;~;r>b*')
+        self.transfLs[0].T = TV
+        for nl in range(1,self.ntransfL):
+          self.transfLs[nl].compute(self.transfLs[nl-1].T)
+
+  def checkdatabase(self):
+    self.logger.debug('Checking database and restoring entries as necessary')
+    with self.shelfcontext() as shelf:
+      if self.ntransfR:
+        if self.transfRs[-1].id.hex not in shelf:
+          # TODO ideally can just call compute
+          self.logger.warn('Right boundary transfer vector missing; restoring')
+          Ar = self.psi.getTc(self.N-1)
+          TV = self.H.getT(self.N-1).contract(Ar,'t-b;l>c,b>b;l>t')
+          TV = TV.contract(Ar,'b-b;~;l>b*')
+          self.transfRs[-1].T = TV
+        for n in range(1,self.ntransfR):
+          if self.transfRs[-n-1].id.hex not in shelf:
+            self.logger.warn('Right transfer vector at %s missing; restoring',
+              self.N-n-1)
+            self.transfRs[-n-1].compute(self.transfRs[-n].T)
+      assert len(self.transfRs) == self.ntransfR
+      if self.ntransfL:
+        # Check converted: TODO depricate
+        for n,tL in enumerate(self.transfLs):
+          if not isinstance(tL,LeftTransferManaged):
+            self.logger.error('Left transfer at %d unconverted',tL.site)
+            self.transfLs[n] = LeftTransferManaged(self.psi,tL.site,'l',
+              self.H, manager=self)
+            self.transfLs[n].T = tL.T
+        for n,tR in enumerate(self.transfRs):
+          if not isinstance(tR,RightTransferManaged):
+            self.logger.error('Right transfer at %d unconverted',tR.site)
+            self.transfRs[n] = RightTransferManaged(self.psi,tR.site,'r',
+              self.H, manager=self)
+            self.transfRs[n].T = tR.T
+
+        if self.transfLs[0].id.hex not in shelf:
+          self.logger.warn('Left boundary transfer vector missing; restoring')
+          Al = self.psi.getTc(0)
+          TV = self.H.getT(0).contract(Al, 't-b;r>c,b>b;r>t')
+          TV = TV.contract(Al, 'b-b;~;r>b*')
+          self.transfLs[0].T = TV
+        for n in range(1,self.ntransfL):
+          if self.transfLs[n].id.hex not in shelf:
+            self.logger.warn('Left transfer vector at %s missing; restoring',n)
+            self.transfLs[n].compute(self.transfLs[n-1].T)
+      assert len(self.transfLs) == self.ntransfL
+      valid_keys = {t.id.hex for t in self.transfLs+self.transfRs}
+      for k in set(shelf) - valid_keys:
+        self.logger.info('Removing unidentified key %s',k)
+        del shelf[k]
+      self.logger.debug('%d valid keys (%d), %d left transfers (%d), %d right transfers (%d)',len(valid_keys),len(shelf),self.ntransfL,len(self.transfLs),self.ntransfR,len(self.transfRs))
+      assert len(shelf) == self.ntransfL + self.ntransfR
+
+  def setdboff(self, remove=True):
+    if self.dbfile:
+      self.logger.warn('Converting shelf into local memory...')
+      database = {}
+      with shelve.open(self.dbfile) as shelf:
+        for k in shelf:
+          database[k] = shelf[k]
+      if remove:
+        self.logger.warn('Deleting shelf database file')
+        import os
+        os.remove(self.dbfile)
+      self.database = database
+      delattr(self,'shelfopen')
+      self.dbfile = None
+      self.save()
+    else:
+      self.logger.debug('Transfer vectors already in local memory')
+          
+
+  def gettransfR(self, n, pop=False):
+    # TODO combine options with proxy context manager?
+    if self.ntransfR:
+      self.logger.debug('Fetching right transfer %d (presently %d, or min. %d)',
+        n,self.ntransfR,self.transfRs[0].site)
+    else:
+      self.logger.debug('Fetching right transfer %d (presently none)',n)
+    with self.shelfcontext() as shelf:
+      if n == self.N-self.ntransfR-1:
+        # Compute transfer
+        if self.ntransfR == 0:
+          tR = self.H.getboundarytransfright(self.psi, manager=self)
+        else:
+          tR = self.transfRs[0].left()
+        if pop:
+          tR.discard = True
+        else:
+          self.transfRs.insert(0, tR)
+          self.ntransfR += 1
+        return tR
+      else:
+        assert n > self.N-self.ntransfR-1
+        tR = self.transfRs[n-(self.N-self.ntransfR)]
+        if pop:
+          while n > self.N-self.ntransfR:
+            self.logger.info('Discarding extranneous right transfer at %d')
+            tR0 = self.transfRs.pop(0)
+            tR0.discard = True
+            self.ntransfR -= 1
+          assert n == self.N-self.ntransfR
+          tR.discard = True
+          self.transfRs.pop(0)
+          self.ntransfR -= 1
+        return tR
+
+  def gettransfL(self, n, pop=False):
+    if self.ntransfL:
+      self.logger.debug('Fetching left transfer %d (presently %d, or max. %d)',
+        n,self.ntransfL,self.transfLs[-1].site)
+    else:
+      self.logger.debug('Fetching left transfer %d (presently none)', n)
+    with self.shelfcontext() as shelf:
+      if n == self.ntransfL:
+        # Compute transfer
+        if self.ntransfL == 0:
+          tL = self.H.getboundarytransfleft(self.psi, manager=self)
+        else:
+          tL = self.transfLs[-1].right()
+        if pop:
+          tL.discard = True
+        else:
+          self.transfLs.append(tL)
+          self.ntransfL += 1
+        return tL
+      else:
+        assert n < self.ntransfL
+        tL = self.transfLs[n]
+        if pop:
+          assert n == self.ntransfL-1
+          tL.discard = True
+          self.transfLs.pop()
+          self.ntransfL -= 1
+        return tL
 
   def restorecanonical(self, almost=False):
     self.logger.log(12,'Restoring to canonical form')
@@ -375,56 +648,58 @@ class DMRGManager:
     return Ldiff
 
   def doubleupdateleft(self):
+    # TODO better way of handling transfer
+    tR = self.gettransfR(2,pop=True)
+    #tR.discard = True
     self.logger.log(12, 'left edge double update')
-    self.H.DMRG_opt_double_left(self.psi, self.chi,
-        self.transfRs.pop(0), self.settings['tol2'])
-    self.transfLs = [self.H.getboundarytransfleft(self.psi)]
+    self.H.DMRG_opt_double_left(self.psi, self.chi, tR, self.settings['tol2'])
+    #self.gettransfL(0)
 
   def doubleupdateright(self):
+    # TODO better way of handling transfer
+    tL = self.gettransfL(self.N-3,pop=True)
+    #tL.discard = True
     self.logger.log(12, 'right edge double update')
-    self.H.DMRG_opt_double_right(self.psi, self.chi, self.transfLs.pop(),
-        self.settings['tol2'])
-    self.transfRs = [self.H.getboundarytransfright(self.psi)]
+    self.H.DMRG_opt_double_right(self.psi, self.chi, tL, self.settings['tol2'])
+    #self.gettransfR(self.N-1)
 
   def doubleupdate(self, n, direction):
     self.logger.log(15, 'site %s double update (%s)', n, direction)
+    tR = self.gettransfR(n+2,pop=(direction=='r'))
+    tL = self.gettransfL(n-1, pop=(direction=='l'))
     self.H.DMRG_opt_double(self.psi, n, self.chi,
-        self.transfLs[-1],self.transfRs[0],None,direction=='r',
-        self.settings['tol2'], self.eigtol)
-    if direction=='r':
-      self.transfRs.pop(0)
-      self.transfLs.append(self.transfLs[-1].right())
-    else:
-      self.transfLs.pop()
-      self.transfRs.insert(0,self.transfRs[0].left())
+        tL,tR,None,direction=='r', self.settings['tol2'], self.eigtol)
 
   def singleupdateleft(self):
+    tR = self.gettransfR(1,pop=True)
+    #tR.discard = True
     self.logger.log(10, 'left edge single update')
-    mat = self.H.DMRG_opt_single_left(self.psi, self.transfRs.pop(0),
-      self.settings['tol1'])
-    self.transfLs = [self.H.getboundarytransfleft(self.psi)]
+    mat = self.H.DMRG_opt_single_left(self.psi, tR, self.settings['tol1'])
     return mat.diag_mult('l', self.psi.getschmidt(0))
 
   def singleupdateright(self, gauge):
+    tL = self.gettransfL(self.N-2,pop=True)
+    #tL.discard = True
     self.logger.log(10, 'right edge single update')
-    mat = self.H.DMRG_opt_single_right(self.psi, self.transfLs.pop(),
-      self.settings['tol2'])
-    self.transfRs = [self.H.getboundarytransfright(self.psi)]
+    mat = self.H.DMRG_opt_single_right(self.psi, tL, self.settings['tol2'])
+    #self.transfRs = [self.H.getboundarytransfright(self.psi)]
     return mat
 
   def singleupdate(self, n, direction, gauge):
     self.logger.log(12, 'site %s single update (%s)', n, direction)
     right = direction == 'r'
+    tR = self.gettransfR(n+1,pop=right)
+    tL = self.gettransfL(n-1, pop=not right)
     gL,gR = (gauge, None) if right else (None, gauge)
-    mat = self.H.DMRG_opt_single(self.psi, n, self.transfLs[-1], self.transfRs[0],
+    mat = self.H.DMRG_opt_single(self.psi, n, tL, tR,
         right, gL, gR, self.settings['tol1'], self.eigtol)
     if right:
       mat = mat.diag_mult('l',self.psi.getschmidt(n))
-      self.transfRs.pop(0)
-      self.transfLs.append(self.transfLs[-1].right())
-    else:
-      self.transfLs.pop()
-      self.transfRs.insert(0, self.transfRs[0].left())
+    #  self.transfRs.pop(0)
+    #  self.transfLs.append(self.transfLs[-1].right())
+    #else:
+    #  self.transfLs.pop()
+    #  self.transfRs.insert(0, self.transfRs[0].left())
     return mat
 
   def gauge_at(self, site, gauge, direction='r'):
