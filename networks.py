@@ -991,20 +991,21 @@ class Network:
         ' limit %0.2fGiB'%(np.dtype(config.FIELD).itemsize*memcap/2**30))
     mem = self.memexpense(tree,reorder=True)
     self._tree = tree
-    #if config.opt_verbose >= 1:
-    # TODO work into logging
-    config.opt_log.log(20,'Optimized with %.0e steps', exp)
-    memk = mem/2**14
+    mems = None
+    memk = mem//(2**6) # itemsize/1024
     if memk < 1000:
-      config.opt_log.log(20,'memory %dKB',round(memk))
+      memf,mems =  memk,'KB'
     else:
       memm = memk/2**10
       if memm < 1000:
-        config.opt_log.log(20,f'memory %0.1fMB',memm)
+        memf,mems = memm,'MB'
       elif memm < 2**20:
-        config.opt_log.log(20,f'memory {memm/2**10:0.1f}GB',memm/2**10)
+        memf,mems = memm/2**10,'GB'
       else:
-        config.opt_log.critical(f'memory {memm/2**20:0.1f}TB (!!!)',memm/2**20)
+        memf,mems = memm/2**20,'TB'
+        config.opt_log.critical('memory usage exceeding terabyte!')
+    config.opt_log.log(20,'Optimized with %.1e steps, memory %0.1f%s', exp,
+      memf,mems)
     if config.opt_verbose >= 1:
       tree.pprint()
     
@@ -1141,6 +1142,10 @@ class Network:
 
   def memexpense(self, tree, root=True, reorder=False):
     """Determine spatial complexity of contraction order given by NetworkTree"""
+    # Intermediate form:
+    # max memory in contracting subtree,
+    #   dimension of free indices of intermediate tensor,
+    #   dimension of contracted indices (by tensors it contracts with) 
     if not tree:
       tree = self.tree
     if isinstance(tree.left, NetworkTree):
@@ -1160,6 +1165,7 @@ class Network:
           lfree *= d
       ltens = {t}
       lmem = 0
+    # Memory cost for intermediate tensor on left
     lx = lfree*functools.reduce(int.__mul__, lcont.values())
     if isinstance(tree.right, NetworkTree):
       rtens = tree.right.leaves
@@ -1178,13 +1184,14 @@ class Network:
           rfree *= d
       rtens = {t}
       rmem = 0
+    # Memory cost for intermediate tensor on right 
     rx = rfree*functools.reduce(int.__mul__, rcont.values())
     if reorder and rmem+lx > lmem+rx:
       tree.left,tree.right = tree.right,tree.left
       tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
-      mem = lmem+rx
+      mem = max(lx,lmem)+rx
     else:
-      mem = rmem+lx
+      mem = max(rx,rmem)+lx
     if root:
       return mem
     cont = {}

@@ -1016,6 +1016,7 @@ class MPOgeneric:
       MR,s,ML = v[np.argmin(w)].svd('r,br|l,r|bl,l',chi=chi, tolerance=tol)
     else:
       ML,s,MR = v[np.argmin(w)].svd('l,bl|r,l|br,r',chi=chi, tolerance=tol)
+    config.logger.debug('SVD for two-site DMRG completed')
     ML = ML.renamed('bl-b')
     MR = MR.renamed('br-b')
     # Separate Schmidt coefficients on either side
@@ -1078,7 +1079,7 @@ class TransferMatrix(ABC):
 
 class LeftTransfer(TransferMatrix):
   def compute(self, TL, fparity=None):
-    config.logger.debug('Applying transfer matrix to left of site %d',self.site)
+    config.logger.log(8,'Applying transfer matrix to left of site %d',self.site)
     # TODO fermion parity for right
     assert set(self.idxs) == TL.idxset
     if self._strict and not self.psi._leftcanon[self.site%self.psi.N]:
@@ -1187,22 +1188,18 @@ class LeftTransferManaged(LeftTransfer):
 
   @property
   def T(self):
-    with self.manager.shelfcontext() as shelf:
-      return shelf[self.id.hex]
+    return self.manager.database[self.id.hex]
 
   @T.setter
   def T(self, value):
-    with self.manager.shelfcontext() as shelf:
-      shelf[self.id.hex] = value
+    self.manager.database[self.id.hex] = value
 
-  def __del__(self):
-    if hasattr(self,'discard') and self.discard == True:
-      with self.manager.shelfcontext() as shelf:
-        del shelf[self.id.hex]
+  def discard(self):
+    del self.manager.database[self.id.hex]
 
 class RightTransfer(TransferMatrix):
   def compute(self, TR):
-    config.logger.debug('Applying transfer matrix to right of site %d',self.site)
+    config.logger.log(8,'Applying transfer matrix to right of site %d',self.site)
     assert set(self.idxs) == TR.idxset
     if self._strict and not self.psi._rightcanon[self.site%self.psi.N]:
       raise ValueError(f'strictly-enforced transfer matrix requires right-canonical: site {self.site%self.psi.N}')
@@ -1309,15 +1306,19 @@ class RightTransferManaged(RightTransfer):
 
   @property
   def T(self):
-    with self.manager.shelfcontext() as shelf:
-      return shelf[self.id.hex]
+    #with self.manager.shelfcontext() as shelf:
+    return self.manager.database[self.id.hex]
 
   @T.setter
   def T(self, value):
-    with self.manager.shelfcontext() as shelf:
-      shelf[self.id.hex] = value
+    self.manager.database[self.id.hex] = value
+    #with self.manager.shelfcontext() as shelf:
+      #shelf[self.id.hex] = value
 
-  def __del__(self):
-    if hasattr(self,'discard') and self.discard == True:
-      with self.manager.shelfcontext() as shelf:
-        del shelf[self.id.hex]
+  def discard(self):
+    del self.manager.database[self.id.hex]
+
+  #def __del__(self):
+  #  if hasattr(self,'discard') and self.discard == True:
+  #    with self.manager.shelfcontext() as shelf:
+  #      del shelf[self.id.hex]

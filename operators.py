@@ -281,12 +281,14 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     nn = len(w)
     if mat:
       T = self._fuse_out.tensor_convert_multiaxis(vs,('c',))
+      config.linalg_log.log(10, 'Eigenvectors converted to matrix form')
       return w, T
     else:
       Ts = []
       for i in range(nn):
         v = vs[:,i]
         Ts.append(self.tensor_in(v/linalg.norm(v)))
+      config.linalg_log.log(10, 'Eigenvectors packaged in individual tensor form')
       return w, Ts
 
   def asdense(self, inprefix='', outprefix='', naive=False):
