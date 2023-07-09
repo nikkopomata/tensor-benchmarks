@@ -50,8 +50,8 @@ stdout_handler = logging.StreamHandler(sys.stderr)
 stdout_handler.setLevel(logging.ERROR)
 stdout_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
 logger.addHandler(stdout_handler)
-def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None):
-  handler = logging.FileHandler(logfile)
+def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
+  handler = logging.FileHandler(logfile,mode=mode)
   formatter = logging.Formatter(fmt=fmtstring, datefmt=datefmt)
   handler.setLevel(level)
   handler.setFormatter(formatter)

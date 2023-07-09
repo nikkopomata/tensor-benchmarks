@@ -1443,7 +1443,9 @@ class Tensor:
     return self._tensorfactory(T1, idx1, space1)
 
   def mat_mult(self, ll, M):
-    """Multiply a matrix along a single index"""
+    """Multiply a matrix along a single index
+    If M is provided as a Tensor, form index-index must be used for ll
+    Otherwise contracts first index of M to ll"""
     if ll[-1] == '*':
       ll = ll[:-1]
       M = M.conj()
