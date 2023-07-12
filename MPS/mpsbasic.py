@@ -63,6 +63,10 @@ class MPS(MPSgeneric):
         self._schmidt.append(d*[1/d])
       self.restore_canonical(tol=tol)
 
+  def iscanon(self):
+    # Just check boolean flags
+    return all(self._leftcanon[:-1]) and all(self._rightcanon[1:])
+
   def issite(self, n):
     return (n >= 0) and (n < self._Nsites)
 
@@ -131,7 +135,7 @@ class MPS(MPSgeneric):
     Ntot = np.linalg.norm(s)
     schmidt[-1] = s/Ntot
     # Right-canonical sweep
-    T = U.diag_mult('r',s)
+    T = U.diag_mult('r',schmidt[-1])
     for n in range(self.N-2,0,-1):
       T = T.contract(Ms[n],'l-r;~')
       V,s,U = T.svd('b,r|l,r|l',tolerance=tol)
@@ -139,7 +143,7 @@ class MPS(MPSgeneric):
       schmidt[n-1] = s/Ni
       Ntot *= Ni
       Ms[n] = V.diag_mult('r',np.power(schmidt[n],-1))
-      T = U.diag_mult('r',s)
+      T = U.diag_mult('r',schmidt[n-1])
       self._leftcanon[n] = True
       self._rightcanon[n] = True
     Ms[0] = U.contract(Ms[0],'l-r;~')

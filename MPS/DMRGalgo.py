@@ -426,7 +426,9 @@ class DMRGManager:
       self.restorecanonical()
     # TODO add_callable method
     if 'process_psi0' in self.callables:
-      self.psi = self.callables[process_psi0](self.psi)
+      self.psi = self.callables['process_psi0'](self.psi)
+    if not self.psi.iscanon():
+      self.restorecanonical()
     self.getE()
 
   def setchi(self, idx, chi):

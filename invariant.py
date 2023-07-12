@@ -461,7 +461,7 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       T = T.reshape((shape[idx],-1))
       #T = sfuse._CG_subst.getH().dot(T)
       #T = T.reshape((shape[idx],d,-1))[:,0,:]
-      T = sfuse._CG_subst[:,::d].getH().dot(T)
+      T = sfuse._CG_subst[:,::d].getH().dot(T).astype(config.FIELD)
       T = np.moveaxis(T,0,idx).reshape(shape[:idx]+(shape[idx]//d,)+shape[idx+1:])
     else:
       irrep = None
@@ -477,7 +477,7 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
           sh = T.shape[1:]
           # Reshape & apply Clebsch-Gordan matrix
           T = T.reshape((d,-1))
-          T = fusion._CGmat.conj().transpose().dot(T)
+          T = fusion._CGmat.conj().transpose().dot(T).astype(config.FIELD)
           T = T.T.reshape(sh+(d,))
         else:
           T = np.moveaxis(T,0,-1)
