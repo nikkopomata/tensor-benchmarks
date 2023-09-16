@@ -1086,6 +1086,17 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
       return self.group.Tensor(T, idxs, spaces)
     return self.group.ChargedTensor(T, idxs, spaces, irrep)
 
+  def init_fromT(self, T, parsestr, *tensors, **settings):
+    if 'irrep' in settings:
+      irrep = settings.pop['irrep']
+    else:
+      irrep = self._irrep
+    if 'args' in settings:
+      settings['args'] = tuple(settings['args'])+(irrep,)
+    else:
+      settings['args'] = (irrep,)
+    return self.__class__.init_from(T, parsestr, self, *tensors, **settings)
+
   def matches(self, A, conj, strict=True):
     if strict and not isinstance(A, self.group.ChargedTensor):
       raise ValueError('Failure to match symmetry group')

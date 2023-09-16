@@ -226,74 +226,75 @@ class DMRGManager:
     self._initlog()
     # In all cases where "database"/"shelf" is in an old format,
     # load as dict & let conversion to new format occur in later processing
-    if 'ntransfR' not in state:
-      self.ntransfR = len(state['transfRs'])
-      self.ntransfL = len(state['transfLs'])
-      self.dbpath = None
-      self.database = {}
-      # Convert to managed
-      for n in range(self.ntransfR):
-        T0 = self.transfRs[n]
-        self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
-          self.H, manager=self)
-        self.transfRs[n].T = T0.T
-      for n in range(self.ntransfL):
-        T0 = self.transfLs[n]
-        self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
-          self.H, manager=self)
-        self.transfLs[n].T = T0.T
-    elif 'database' not in state:
-      # TODO depricate
-      if self.dbfile:
-        # Need to re-load before unloading
-        self.transfRs = []
-        self.transfLs = []
-        assert self.dbfile[-3:] == '.db'
-        self.database = None
-        with shelve.open(self.dbfile) as shelf:
-          if self.ntransfR and (f'{self.N-self.ntransfR}R' not in shelf):
-            self.transfRs = self.H.right_transfer(self.psi,self.N-self.ntransfR,collect=True)
-          else:
-            for n in range(self.N-self.ntransfR,self.N):
-              self.transfRs.append(shelf.pop(f'{n}R'))
-          if self.ntransfL and (f'{self.ntransfL-1}L' not in shelf):
-            self.transfLs = self.H.left_transfer(self.psi,self.ntransfL-1,collect=True)
-          else:
-            for n in range(self.ntransfL):
-              self.transfLs.append(shelf.pop(f'{n}L'))
-      else:
+    if not config.loadonly:
+      if 'ntransfR' not in state:
+        self.ntransfR = len(state['transfRs'])
+        self.ntransfL = len(state['transfLs'])
         self.dbpath = None
-      del self.dbfile
-      self.database = {}
-      # Convert to managed
-      for n in range(self.ntransfR):
-        T0 = self.transfRs[n]
-        self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
-          self.H, manager=self)
-        self.transfRs[n].T = T0.T
-      for n in range(self.ntransfL):
-        T0 = self.transfLs[n]
-        self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
-          self.H, manager=self)
-        self.transfLs[n].T = T0.T
-    elif 'dbfile' in state:
-      if self.dbfile:
         self.database = {}
-        if os.path.isfile(self.dbfile):
+        # Convert to managed
+        for n in range(self.ntransfR):
+          T0 = self.transfRs[n]
+          self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
+            self.H, manager=self)
+          self.transfRs[n].T = T0.T
+        for n in range(self.ntransfL):
+          T0 = self.transfLs[n]
+          self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
+            self.H, manager=self)
+          self.transfLs[n].T = T0.T
+      elif 'database' not in state:
+        # TODO depricate
+        if self.dbfile:
+          # Need to re-load before unloading
+          self.transfRs = []
+          self.transfLs = []
+          assert self.dbfile[-3:] == '.db'
+          self.database = None
           with shelve.open(self.dbfile) as shelf:
-            for k in shelf:
-              self.database[k] = shelf.pop(k)
-          os.remove(self.dbfile)
+            if self.ntransfR and (f'{self.N-self.ntransfR}R' not in shelf):
+              self.transfRs = self.H.right_transfer(self.psi,self.N-self.ntransfR,collect=True)
+            else:
+              for n in range(self.N-self.ntransfR,self.N):
+                self.transfRs.append(shelf.pop(f'{n}R'))
+            if self.ntransfL and (f'{self.ntransfL-1}L' not in shelf):
+              self.transfLs = self.H.left_transfer(self.psi,self.ntransfL-1,collect=True)
+            else:
+              for n in range(self.ntransfL):
+                self.transfLs.append(shelf.pop(f'{n}L'))
         else:
-          self.logger.error('Database file not found, regenerating')
-          self.regenerate()
-      del self.dbfile
-      self.dbpath = None
-    elif 'dbpath' not in state:
-      self.logger.critical('Unexpected pickle state')
-      self.dbpath = None
-      self.database = {}
-    # TODO recovery options if directory is expected but does not exist
+          self.dbpath = None
+        del self.dbfile
+        self.database = {}
+        # Convert to managed
+        for n in range(self.ntransfR):
+          T0 = self.transfRs[n]
+          self.transfRs[n] = RightTransferManaged(self.psi,T0.site,'r',
+            self.H, manager=self)
+          self.transfRs[n].T = T0.T
+        for n in range(self.ntransfL):
+          T0 = self.transfLs[n]
+          self.transfLs[n] = LeftTransferManaged(self.psi,T0.site,'l',
+            self.H, manager=self)
+          self.transfLs[n].T = T0.T
+      elif 'dbfile' in state:
+        if self.dbfile:
+          self.database = {}
+          if os.path.isfile(self.dbfile):
+            with shelve.open(self.dbfile) as shelf:
+              for k in shelf:
+                self.database[k] = shelf.pop(k)
+            os.remove(self.dbfile)
+          else:
+            self.logger.error('Database file not found, regenerating')
+            self.regenerate()
+        del self.dbfile
+        self.dbpath = None
+      elif 'dbpath' not in state:
+        self.logger.critical('Unexpected pickle state')
+        self.dbpath = None
+        self.database = {}
+      # TODO recovery options if directory is expected but does not exist
     self.chirules = {}
     self._initfuncs()
     self.supervisors = 'paused'
@@ -335,7 +336,7 @@ class DMRGManager:
     self.chirules = {}
     # Restart base supervisor
     if len(self.supstatus):
-      self.supstatus[0] = (self.chi,self.supstatus[0][1])
+      self.supstatus[0] = (self.chi,)+self.supstatus[0][1:]
     if self.supervisors != 'paused' and len(self.supervisors):
       self.supervisors[0] = self.supfunctions['base'](self.chis,self.N,self.settings,self.supstatus[0])
 
@@ -356,6 +357,22 @@ class DMRGManager:
     else:
       for i in idx:
         self.settingbychi(self.chis[i], **kw_args)
+
+  def set_command(self, name, func, bind=True):
+    """Add additional supervisor-callable 'command' function
+    if bind, make a quasi-bound method by adding self as argument"""
+    if bind:
+      import functools
+      func = functools.partial(func,self)
+    self.supcommands[name] = func
+
+  def add_callable(self, name, func, bind=False):
+    """Add additional directly-callable  function
+    if bind, make a quasi-bound method by adding self as argument"""
+    if bind:
+      import functools
+      func = functools.partial(func,self)
+    self.callables[name] = func
 
   def useSupervisor(self,name,func):
     """Use function passed instead of standard"""
@@ -424,7 +441,6 @@ class DMRGManager:
       self.logger.log(10, 'Using bond %s',bond)
       self.psi = self.H.rand_MPS(bond=bond)
       self.restorecanonical()
-    # TODO add_callable method
     if 'process_psi0' in self.callables:
       self.psi = self.callables['process_psi0'](self.psi)
     if not self.psi.iscanon():
@@ -708,6 +724,7 @@ class DMRGManager:
 
   def restorecanonical(self, almost=False):
     self.logger.log(12,'Restoring to canonical form')
+    # TODO almost-canonical
     self.psi.restore_canonical(almost_canon=True)
 
   def compare1(self, niter):
