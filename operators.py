@@ -216,6 +216,55 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
   def H(self):
     return self.adjoint()
 
+  def project(self, projector, apply_in=True, apply_out=True):
+    """Apply projector to input and/or output indices
+    Pass 'projector' as isometric matrix acting on effective index"""
+    #TODO alternative inputs
+    #TODO processing through fusion ensures disagreement when directly called
+    # with tensor_action 
+    if apply_in and apply_out and self.is_endomorphic:
+      self._fuse_in = ProjectionFusion(self._fuse_in, projector)
+      self._fuse_out = self._fuse_in
+    else:
+      if apply_in:
+        self._fuse_in = ProjectionFusion(self._fuse_in, projector)
+      if apply_out:
+        self._fuse_out = ProjectionFusion(self._fuse_out, projector)
+
+  def project_out(self, vectors, apply_in=True, apply_out=True, tol=1e-14):
+    """Project out vectors (provided as a list of rank-n tensors or single
+    rank-n+1 tensor, for n rank of input space--must use same index names)
+    by calculating projector onto orthogonal completement & applying as in
+    project()
+    if tol is 0 or None project out linear combinations of any amplitude
+    (effectively, do full-rank unless exact duplicate is provided); otherwise
+    will be the minimum amplitude"""
+    if apply_in and apply_out and not self.is_endomorphic:
+      # Apply separately
+      self.project_out(vectors, apply_in=False, apply_out=True, tol=tol)
+      apply_out = False
+    assert apply_in or apply_out
+    fuse = self._fuse_in if apply_in else self._fuse_out
+    if isinstance(vectors,Tensor):
+      # TODO more efficient, extensible way of converting
+      assert vectors.rank == fuse.rank+1
+      assert set(fuse._idxs).issubset(vectors.idxset)
+      iextra = (vectors.idxset - set(fuse._idxs)).pop()
+      dextra = vectors.shape[iextra]
+      T = vectors.permuted((iextra,)+tuple(fuse._idxs))
+      vectors = [vectors.init_fromT(T[n], ','.join(f'{idx}|0.{idx}' for idx in fuse._idxs)) for n in range(dextra)]
+    mat = np.array([fuse.vector_convert(v) for v in vectors])
+    L,s,R = linalg.svd(mat,full_matrices=True)
+    if not tol:
+      bi = s==0
+    else:
+      maxval = max(abs(v) for v in vectors)
+      cutoff = maxval*tol
+      bi = s < cutoff
+    bi = np.concatenate([bi, np.ones(R.shape[0]-len(s),dtype=bool)])
+    w = R[bi,:].conj()
+    self.project(w, apply_in=apply_in,apply_out=apply_out)
+
   def eigs(self, k, herm=True, vecs=True, nv=None, guess=None, mat=False,
       **eigs_kw):
     """Eigendecomposition of linear transformation obtained from network,
@@ -762,3 +811,60 @@ class IdentityOperator(TensorOperator):
     assert len(set(inidx) | set(outidx)) == 2*len(inidx)
     return self._fuse_in.tensorclass._identity(outidx, inidx,
       self._fuse_in._spaces_in)
+
+
+class ProjectionFusion(FusionPrimitive):
+  """Represent projector (in the sense of isometry) from "output"
+  effective space of fusion to subspace"""
+  def __init__(self, base, w):
+    assert isinstance(base,FusionPrimitive)
+    if isinstance(base, ProjectionFusion):
+      # Compose projectors
+      w = w.dot(base.isometry)
+      base = base.__base
+    assert isinstance(w,np.ndarray) or isinstance(w,sparse.linalg.LinearOperator)
+    self.__base = base
+    self.isometry = w
+    assert w.shape[1] == base.effective_dim
+    self._rank = self.__base._rank
+
+  def conj(self):
+    return self.__class__(self.__base.conj(), self.isometry.conj())
+
+  @property
+  def tensorclass(self):
+    return self.__base.tensorclass
+
+  @property
+  def _spaces_in(self):
+    return self.__base._spaces_in
+
+  @property
+  def _idxs(self):
+    return self.__base._idxs
+
+  @property
+  def _out(self):
+    return self.__base._out
+
+  @property
+  def dim(self):
+    return self.__base.dim
+
+  def vector_convert(self, T, idx=None):
+    return self.isometry.dot(self.__base.vector_convert(T,idx=idx))
+
+  def tensor_convert(self, v, idx=None):
+    vx = self.isometry.T.conj().dot(v)
+    return self.__base.tensor_convert(vx,idx=idx)
+
+  def tensor_convert_multiaxis(self, T, idx_newax, ax_old=0, **kw_args):
+    # TODO check operationality
+    T1 = T.moveaxis(ax_old,0)
+    T1 = self.isometry.T.conj().dot(T1)
+    T1 = T1.moveaxis(0,ax_old)
+    return self.__base.tensor_convert_multiaxis(T1,idx_newax,ax_old=ax_old,**kw_args)
+
+  @property
+  def effective_dim(self):
+    return self.isometry.shape[0]

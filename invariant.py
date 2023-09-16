@@ -338,17 +338,17 @@ class SubstantiatingFusion(InvariantFusion):
     return slice(i0,i0+d*n,d)
 
   def asflattensor(self, v1):
-    return self.group.ChargedTensor(v1,(0,),(self._out,),self._irrep)
+    return self.tensorclass(v1,(0,),(self._out,),self._irrep)
 
   @property
   def tensorclass(self):
-    return self.group.ChargedTensor
+    return ChargedTensor.derive(self.group)
 
   def empty_like(self, idxs=None):
     if idxs is None:
       idxs = self._idxs
     T = np.empty(self.shape,dtype=config.FIELD)
-    return self.group.ChargedTensor(T, idxs, self._spaces_in, self._irrep)
+    return self.tensorclass(T, idxs, self._spaces_in, self._irrep)
 
   @property
   def irrep_idx(self):

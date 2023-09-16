@@ -1032,8 +1032,13 @@ class TransferMatrix(ABC):
   # TODO trace, contract methods
   def __init__(self, psi, site, lr, *Ops, **kw_args):
     # lr specfiies which side schmidt vectors go
+    # if there is a distinct bra vector, pass as final positional argument 
     self.psi = psi
     self.site = site
+    if len(Ops) and isinstance(Ops[-1], MPSgeneric):
+      self._psi2 = Ops.pop()
+    else:
+      self._psi2 = None
     self.operators = Ops
     if len(Ops) == 1:
       self.opidx = ('c',)
@@ -1048,12 +1053,27 @@ class TransferMatrix(ABC):
     else:
       self.T = None
 
-  #TODO option for bra != ket
+  def sitetensors(self, fparity=None):
+    if self._schmidtdir == 'l':
+      psiTs = (self.ket.getTL(self.site),self.bra.getTL(self.site))
+    else:
+      psiTs = (self.ket.getTR(self.site),self.bra.getTR(self.site))
+    return psiTs + tuple(Op.getT(self.site) for Op in self.operators)
 
-  @abstractmethod
-  def compute(self, T0, idxs=None):
-    # Default indices: t,c,b for #op=1, otherwise t,c0,...,b
-    pass
+  def compute(self, T0, fparity=None):
+    # T0 is previous tensor; if boundary pass None
+    # fparity is diagonal of fermionic parity matrix; applied to bra
+    assert set(self.idxs) == T0.idxset
+    self.checkcanon()
+    if T0 is None:
+      net = networks.Network.network(self.netconstructor(starter=True),self.sitetensors(fparity=fparity))
+    else:
+      net = networks.Network.network(self.netconstructor(),T0,*self.sitetensors(fparity=fparity))
+    if fparity is not None:
+      net['bra'] = net['bra'].diag_mult('b',fparity)
+    config.logger.log(5,'computing transfer matrix at site %d (i.e. %d) depth %d',self.site,self.site%self.psi.N,self.depth)
+    self.T = net.contract()
+    return self.T
 
   def setvalue(self, T):
     self.T = T
@@ -1077,55 +1097,79 @@ class TransferMatrix(ABC):
     # Initialize next transfer vector (without tensor)
     pass
 
-class LeftTransfer(TransferMatrix):
-  def compute(self, TL, fparity=None):
-    config.logger.log(8,'Applying transfer matrix to left of site %d',self.site)
-    # TODO fermion parity for right
-    assert set(self.idxs) == TL.idxset
-    if self._strict and not self.psi._leftcanon[self.site%self.psi.N]:
-      raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
-    if self._schmidtdir == 'l':
-      psiT = self.psi.getTL(self.site)
+  def __setstate__(self,state):
+    # Inclusion of separate bra MPS
+    self.__dict__.update(state)
+    if '_psi2' not in state:
+      self._psi2 = None
+
+  @property
+  def bra(self):
+    if self._psi2 is None:
+      return self.psi
     else:
-      psiT = self.psi.getTR(self.site)
-    if config.verbose > config.VDEBUG:
-      print(f'left transfer at site {self.site}, ({self.site%self.psi.N}) depth {self.depth}')#DEBUG
-    T = TL.contract(psiT,'t-l;~;r>t,b>q')
-    for n in range(self.depth):
-      T = T.contract(self.operators[n].getT(self.site),
-        f'{self.opidx[n]}-l,q-t;~;r>{self.opidx[n]},b>q')
-    if fparity is not None:
-      psiT = psiT.diag_mult('b',fparity)
-    T = T.contract(psiT,f'b-l,q-b;~;r>b*')
-    self.T = T
-    return T
+      return self._psi2
+
+  @property
+  def ket(self):
+    return self.psi
+
+  @bra.setter
+  def bra(self, phi):
+    self._psi2 = phi
+
+  @ket.setter
+  def ket(self, phi):
+    self.psi = phi
+
+class LeftTransfer(TransferMatrix):
+  def netconstructor(self, terminal=False, starter=False):
+    tens = ['T','ket','bra*']+[f'O{i}' for i in range(self.depth)]
+    outstr = 'ket.r>t,bra.r>b'
+    bondh = 'ket.l-T.t,bra.l-T.b'
+    if self.depth == 0:
+      bondv = 'ket.b-bra.b'
+    else:
+      bondh += f',O0.l-T.{self.opidx[0]}'
+      bondv = f'ket.b-O0.t,bra.b-O{self.depth-1}.b'
+      outstr += ',O0.r>'+self.opidx[0]
+      for i in range(1,self.depth):
+        outstr += f',O{i}.r>{self.opidx[i]}'
+        bondh += f',T.{self.opidx[i]}-O{i}.l'
+        bondv += f',O{i-1}.b-O{i}.t'
+    if terminal:
+      return ';'.join(tens+[bondv+','+bondh])
+    elif starter:
+      return ';'.join(tens[1:]+[bondv,outstr])
+    else:
+      return ';'.join(tens+[bondv+','+bondh,outstr])
+
+  def checkcanon(self):
+    config.logger.log(8,'Applying transfer matrix to left of site %d',self.site)
+    if self._strict and not (self.bra._leftcanon[self.site%self.psi.N] and self.ket._leftcanon[self.site%self.psi.N]):
+      raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
 
   def setstrict(self):
     assert self._schmidtdir == 'l'
     self._strict = True
 
   def right(self, terminal=False, fparity=None, unstrict=False):
+    Tnext = self.initnext()
     if terminal:
       assert self.site == self.psi.N-2
-      if self._schmidtdir == 'l':
-        psiT = self.psi.getTL(self.site+1)
-      else:
-        psiT = self.psi.getTR(self.site+1)
-      T = self.T.contract(psiT,'t-l;~;b>q')
-      for n in range(self.depth):
-        T = T.contract(self.operators[n].getT(self.site+1),
-          f'{self.opidx[n]}-l,q-t;~;b>q')
-      if fparity is not None:
-        psiT = psiT.diag_mult('b',fparity)
-      return T.contract(psiT,'b-l,q-b*')
-    Tnext = self.initnext()
+      net = networks.Network.network(Tnext.netconstructor(terminal=True),
+        self.T, *Tnext.sitetensors(fparity=fparity))
+      return net.contract()
     if not unstrict:
       Tnext._strict = self._strict
     Tnext.compute(self.T, fparity=fparity)
     return Tnext
 
   def initnext(self):
-    return LeftTransfer(self.psi,self.site+1,self._schmidtdir, *self.operators)
+    ops = list(self.operators)
+    if self._psi2 is not None:
+      ops.append(self._psi2)
+    return LeftTransfer(self.psi,self.site+1,self._schmidtdir, *ops)
 
   def moveby(self, dn, collect=False, unstrict=False):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
@@ -1146,7 +1190,8 @@ class LeftTransfer(TransferMatrix):
 
   def Ereduce(self):
     # Subtract out accrued multiples of terminal condition
-    assert self.depth == 1
+    assert self._psi2 is None
+    assert self.depth == 1 and self._psi2 is None
     O = self.operators[0]
     assert (self.site+1)%O.N == 0
     if self._schmidtdir == 'r':
@@ -1173,6 +1218,7 @@ class LeftTransfer(TransferMatrix):
     
   def initializer(self):
     # Check normalization of "initializer"
+    assert self._psi2 is None
     assert self.depth == 1 and self._schmidtdir == 'l'
     T = self.T.diag_mult('b',np.power(self.psi.getschmidt(self.site),2))
     return T.trace(f't-b').contract(self.operators[0].Rterm,f'c-l')
@@ -1183,8 +1229,11 @@ class LeftTransfer(TransferMatrix):
 
 class LeftTransferManaged(LeftTransfer):
   def initnext(self):
+    ops = list(self.operators)
+    if self._psi2 is not None:
+      ops.append(self._psi2)
     return LeftTransferManaged(self.psi,self.site+1,self._schmidtdir,
-      *self.operators, manager=self.manager)
+      *ops, manager=self.manager)
 
   @property
   def T(self):
@@ -1198,52 +1247,56 @@ class LeftTransferManaged(LeftTransfer):
     del self.manager.database[self.id.hex]
 
 class RightTransfer(TransferMatrix):
-  def compute(self, TR):
-    config.logger.log(8,'Applying transfer matrix to right of site %d',self.site)
-    assert set(self.idxs) == TR.idxset
-    if self._strict and not self.psi._rightcanon[self.site%self.psi.N]:
-      raise ValueError(f'strictly-enforced transfer matrix requires right-canonical: site {self.site%self.psi.N}')
-    if self._schmidtdir == 'r':
-      psiT = self.psi.getTR(self.site)
+  def netconstructor(self, terminal=False, starter=False):
+    tens = ['T','ket','bra*']+[f'O{i}' for i in range(self.depth)]
+    outstr = 'ket.l>t,bra.l>b'
+    bondh = 'ket.r-T.t,bra.r-T.b'
+    if self.depth == 0:
+      bondv = 'ket.b-bra.b'
     else:
-      psiT = self.psi.getTL(self.site)
-    if config.verbose > config.VDEBUG:
-      print(f'right transfer at site {self.site}, ({self.site%self.psi.N}) depth {self.depth}')#DEBUG
-    T = TR.contract(psiT,'t-r;~;l>t,b>q')
-    for n in range(self.depth):
-      T = T.contract(self.operators[n].getT(self.site),
-        f'{self.opidx[n]}-r,q-t;~;l>{self.opidx[n]},b>q')
-    T = T.contract(psiT,'b-r,q-b;~;l>b*')
-    self.T = T
-    return T
+      bondh += f',O0.r-T.{self.opidx[0]}'
+      bondv = f'ket.b-O0.t,bra.b-O{self.depth-1}.b'
+      outstr += ',O0.l>'+self.opidx[0]
+      for i in range(1,self.depth):
+        outstr += f',O{i}.r>{self.opidx[i]}'
+        bondh += f',T.{self.opidx[i]}-O{i}.r'
+        bondv += f',O{i-1}.b-O{i}.t'
+    if terminal:
+      return ';'.join(tens+[bondv+','+bondh])
+    elif starter:
+      return ';'.join(tens[1:]+[bondv,outstr])
+    else:
+      return ';'.join(tens+[bondv+','+bondh,outstr])
+
+  def checkcanon(self):
+    config.logger.log(8,'Applying transfer matrix to right of site %d',self.site)
+    if self._strict and not (self.bra._rightcanon[self.site%self.psi.N] and self.ket._rightcanon[self.site%self.psi.N]):
+      raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
 
   def setstrict(self):
     assert self._schmidtdir == 'r'
     self._strict = True
 
-  def left(self, terminal=False, unstrict=False):
+  def left(self, terminal=False, fparity=None, unstrict=False):
     # terminal: state and/or operators are finite, yield number or lower-rank
     # transfer matrix
     # TODO case of one or more operators terminating
+    Tnext = self.initnext()
     if terminal:
       assert self.site == 1
-      if self._schmidtdir == 'r':
-        psiT = self.psi.getTR(self.site-1)
-      else:
-        psiT = self.psi.getTL(self.site-1)
-      T = self.T.contract(psiT,'t-r;~;b>q')
-      for n in range(self.depth):
-        T = T.contract(self.operators[n].getT(self.site-1),
-          f'{self.opidx[n]}-r,q-t;~;b>q')
-      return T.contract(psiT,'b-r,q-b*')
-    Tnext = self.initnext()
+      net = networks.Network.network(Tnext.netconstructor(terminal=True),
+        self.T, *Tnext.sitetensors(fparity=fparity))
+      return net.contract()
     if not unstrict:
       Tnext._strict = self._strict
     Tnext.compute(self.T)
     return Tnext
 
   def initnext(self):
-    return RightTransfer(self.psi,self.site-1,self._schmidtdir, *self.operators)
+    ops = list(self.operators)
+    if self._psi2 is not None:
+      ops.append(self._psi2)
+    return RightTransfer(self.psi,self.site-1,self._schmidtdir, *ops)
 
   def moveby(self, dn, collect=False, unstrict=False):
     if self._strict and config.verbose >= config.VDEBUG: #DEBUG
@@ -1301,8 +1354,11 @@ class RightTransfer(TransferMatrix):
 
 class RightTransferManaged(RightTransfer):
   def initnext(self):
+    ops = list(self.operators)
+    if self._psi2 is not None:
+      ops.append(self._psi2)
     return RightTransferManaged(self.psi,self.site-1,self._schmidtdir,
-      *self.operators, manager=self.manager)
+      ops, manager=self.manager)
 
   @property
   def T(self):

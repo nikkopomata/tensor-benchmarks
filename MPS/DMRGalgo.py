@@ -1,7 +1,7 @@
 from .mpsbasic import *
 from .. import config
 import os,os.path,shutil
-import pickle,shelve,contextlib
+import pickle,shelve,contextlib,itertools
 import logging
 import numpy as np
 from copy import copy,deepcopy
@@ -527,17 +527,11 @@ class DMRGManager:
   def regenerate(self):
     if self.ntransfR:
       # Start with boundary 
-      Ar = self.psi.getTc(self.N-1)
-      TV = self.H.getT(self.N-1).contract(Ar,'t-b;l>c,b>b;l>t')
-      TV = TV.contract(Ar,'b-b;~;l>b*')
-      self.transfRs[-1].T = TV
+      self.transfRs[-1].compute(None)
       for nr in range(self.ntransfR-2,-1,-1):
         self.transfRs[nr].compute(self.transfRs[nr+1].T)
     if self.ntransfL:
-      Al = self.psi.getTc(0)
-      TV = self.H.getT(0).contract(Al, 't-b;r>c,b>b;r>t')
-      TV = TV.contract(Al, 'b-b;~;r>b*')
-      self.transfLs[0].T = TV
+      self.transfLs[0].compute(None)
       for nl in range(1,self.ntransfL):
         self.transfLs[nl].compute(self.transfLs[nl-1].T)
 
@@ -619,7 +613,7 @@ class DMRGManager:
       self.logger.debug('Transfer vectors already in local memory')
           
 
-  def gettransfR(self, n, pop=False):
+  def gettransfR(self, n):
     # TODO combine options with proxy context manager?
     self.logger.debug('Fetching right transfer %d',n)
     if self.ntransfR:
@@ -633,29 +627,15 @@ class DMRGManager:
         tR = self.H.getboundarytransfright(self.psi, manager=self)
       else:
         tR = self.transfRs[0].left()
-      if pop:
-        tR.discard = True
-      else:
-        self.transfRs.insert(0, tR)
-        self.ntransfR += 1
+      self.transfRs.insert(0, tR)
+      self.ntransfR += 1
       return tR
     else:
       assert n > self.N-self.ntransfR-1
       tR = self.transfRs[n-(self.N-self.ntransfR)]
-      if pop:
-        while n > self.N-self.ntransfR:
-          self.logger.info('Discarding extranneous right transfer at %d')
-          tR0 = self.transfRs.pop(0)
-          tR0.discard = True
-          self.ntransfR -= 1
-        assert n == self.N-self.ntransfR
-        tR.discard = True
-        self.transfRs.pop(0)
-        self.ntransfR -= 1
       return tR
 
-  def gettransfL(self, n, pop=False):
-    assert not pop # TODO depricate
+  def gettransfL(self, n):
     self.logger.debug('Fetching left transfer %d',n)
     if self.ntransfL:
       self.logger.log(5,'(presently %d, or maximum %d)',
@@ -668,11 +648,8 @@ class DMRGManager:
         tL = self.H.getboundarytransfleft(self.psi, manager=self)
       else:
         tL = self.transfLs[-1].right()
-      if pop:
-        tL.discard = True
-      else:
-        self.transfLs.append(tL)
-        self.ntransfL += 1
+      self.transfLs.append(tL)
+      self.ntransfL += 1
       return tL
     else:
       #assert n < self.ntransfL
@@ -685,11 +662,6 @@ class DMRGManager:
         self.transfLs.append(tL)
         self.ntransfL += 1
       tL = self.transfLs[n]
-      if pop:
-        assert n == self.ntransfL-1
-        tL.discard = True
-        self.transfLs.pop()
-        self.ntransfL -= 1
       return tL
 
   def discardleft(self):
@@ -1115,3 +1087,398 @@ class PseudoShelf(MutableMapping):
       for f in os.listdir(d):
         if f[:-2] == '.p':
           shutil.copy2(os.path.join(d,f),os.path.join(self.path,f))
+
+class DMRGOrthoManager(DMRGManager):
+  """Set of low-lying orthogonal states"""
+  def __init__(self, Hamiltonian, chis, npsis, **kw_args):
+    self.psiindex = 0
+    self.npsis = npsis
+    self.psilist = npsis*[None]
+    self.dottransferR = []
+    self.dottransferL = []
+    self.transfcache = {}
+    self.dottransfcache = {}
+    super().__init__(Hamiltonian, chis, **kw_args)
+    self.__version = '0'
+
+  @property
+  def psi(self):
+    return self.psilist[self.psiindex]
+
+  @psi.setter
+  def psi(self, value):
+    self.psilist[self.psiindex] = value
+
+  def _initfuncs(self):
+    super()._initfuncs()
+    # Labels for supervisors
+    self.supfunctions['base'] = baseOrthoSupervisor
+    # Labels for bound methods
+
+  def savestep(self):
+    """Save output after optimizing a single state"""
+    self.logger.log(20,'Saving completed state #%d',self.psiidx)
+    pickle.dump((self.psi,self.E),open(f'{self.saveprefix}n{self.psiidx}.p','wb'))
+
+  # TODO initialization for next states
+  # def initstate(self):
+
+  def getrighttransfers(self, n0):
+    self.logger.log(20, 'Collecting right transfer matrices')
+    self.database.clear()
+    self.transfRs = self.H.right_transfer(self.psi, n0, collect=True, manager=self)
+    self.transfLs = []
+    self.ntransfR = len(self.transfRs)
+    self.ntransfL = 0
+    self.dottransferL = []
+    self.dottransferR = []
+    for i in range(self.psiindex):
+      self.dottransferL.append([])
+      phi = self.psilist[i]
+      tR = RightTransferManaged(self.psi, self.N-1, 'r', phi, manager=self)
+      self.dottransferR.append(tR.moveby(self.N-1-n0,collect=True)[::-1])
+
+  def setdbon(self):
+    dbpath = self.filename[:-1]+'d'
+    if not self.dbpath:
+      self.logger.warn('Transferring transfer tensors to shelf...')
+      # Create database
+      database = PseudoShelf(dbpath)
+      database.update(self.database)
+      del self.database
+      self.database = database
+      self.dbpath = dbpath
+      self.logger.debug('Shelf created at %s',dbpath)
+      self.save()
+    elif dbpath != self.dbpath:
+      self.logger.info('Copying shelf from %s to %s',dbpath,self.dbpath)
+      if isinstance(self.database,PseudoShelf):
+        self.dbpath = dbpath
+        try:
+          self.database.copyto(dbpath)
+        except FileNotFoundError:
+          self.logger.warn('Shelf directory not found, repopulating %d left and '
+            '%d right transfer vectors', self.ntransfL,self.ntransfR)
+          self.regenerate()
+      else:
+        self.database = PseudoShelf(dbpath)
+        try:
+          self.database.update(self.dbpath)
+        except FileNotFoundError:
+          self.logger.warn('Shelf directory not found, repopulating %d left and '
+            '%d right transfer vectors', self.ntransfL,self.ntransfR)
+          self.regenerate()
+      # Move database
+      self.save()
+    else:
+      self.logger.debug('Shelf already in place')
+    try:
+      self.checkdatabase()
+    except AssertionError:
+      self.logger.exception('Error checking database; recomputing transfers')
+      self.regenerate()
+
+  def regenerate(self):
+    if self.ntransfR:
+      # Start with boundary 
+      self.transfRs[-1].compute(None)
+      for nr in range(self.ntransfR-2,-1,-1):
+        self.transfRs[nr].compute(self.transfRs[nr+1].T)
+      for dotR in self.dottransferR:
+        dotR[-1].compute(None)
+        for nr in range(self.ntransfR-2,-1,-1):
+          dotR[nr].compute(dotR[nr+1].T)
+    if self.ntransfL:
+      self.transfLs[0].compute(None)
+      for nl in range(1,self.ntransfL):
+        self.transfLs[nl].compute(self.transfLs[nl-1].T)
+      for dotL in self.dottransferL:
+        dotL[0].compute(None)
+        for nl in range(1,self.ntransfL):
+          dotR[nl].compute(dotR[nl-1].T)
+
+  def checkdatabase(self):
+    self.logger.debug('Checking database and restoring entries as necessary')
+    if self.dbpath:
+      if not self.database:
+        self.database = PseudoShelf(self.dbpath)
+      keys = self.database.checkentries()
+    else:
+      keys = set(self.database)
+    if self.ntransfR:
+      for idx,tR in enumerate(self.dottransfR+[self.transfRs]):
+        if idx == self.psiindex:
+          state = 'H'
+        else:
+          state = idx
+        if tR[-1].id.hex not in keys:
+          self.logger.warn('Right boundary transfer vector (%s) missing; restoring',state)
+          tR[-1].compute(None)
+        for n in range(1,self.ntransfR):
+          if tR[-n-1].id.hex not in keys:
+            if idx == self.psiindex:
+              self.logger.warn('Right transfer vector at %s (%s) missing; '
+                'restoring', self.N-n-1, state)
+            tR[-n-1].compute(tR[-n].T)
+        assert len(tR) == self.ntransfR
+    if self.ntransfL:
+      for idx,tL in enumerate(self.dottransfL+[self.transfLs]):
+        if idx == self.psiindex:
+          state = 'H'
+        else:
+          state = idx
+        if tL.id.hex not in keys:
+          self.logger.warn('Left boundary transfer vector (%s) missing; restoring',state)
+          tL.compute(None)
+        for n in range(1,self.ntransfL):
+          if tL[n].id.hex not in keys:
+            self.logger.warn('Left transfer vector at %s (%s) missing; '
+              'restoring',n,state)
+          tL[n].compute(tL[n-1].T)
+        assert len(tL) == self.ntransfL
+      valid_keys = {t.id.hex for tlist in ([self.transfLs,self.transfRs]+self.dottransferR+self.dottransferL) for t in tlist}
+      for k in keys - valid_keys:
+        self.logger.info('Removing unidentified key %s',k)
+        del self.database[k]
+      self.logger.log(8,'%d valid keys (%d), %d left transfers, %d right transfers, state #%d',len(valid_keys),len(self.database),self.ntransfL,self.ntransfR,self.psiindex)
+    assert len(self.database) == (self.psiindex+1)*(self.ntransfL + self.ntransfR)
+
+  @property
+  def rtransflist(self):
+    return [self.transfRs]+self.dottransferR
+
+  @property
+  def ltransflist(self):
+    return [self.transfLs]+self.dottransferL
+
+  def gettransfR(self, n):
+    # TODO combine options with proxy context manager?
+    self.logger.debug('Fetching right transfer %d',n)
+    if n == self.N-self.ntransfR-1:
+      # Compute transfer
+      if self.ntransfR == 0:
+        tR = self.H.getboundarytransfright(self.psi, manager=self)
+        self.transfRs = [tR]
+        yield tR
+        for i in range(self.psiindex):
+          tR = RightTransferManaged(self.psi,self.N-1,'r',self.psilist[i],
+            manager=manager)
+          self.dottransferR[i] = [tR]
+          yield tR
+      else:
+        for tlist in self.rtransflist:
+          tR = tlist[0].left()
+          yield tR
+          tlist.insert(0,tR)
+      self.ntransfR += 1
+      return tR
+    else:
+      assert n > self.N-self.ntransfR-1
+      return (tlist[n-(self.N-self.ntransfR)] for tlist in self.rtransflist)
+
+  def gettransfL(self, n):
+    self.logger.debug('Fetching left transfer %d',n)
+    if n == self.ntransfL:
+      # Compute transfer
+      if self.ntransfL == 0:
+        tL = self.H.getboundarytransfleft(self.psi, manager=self)
+        self.transfLs = [tL]
+        yield tL
+        for i in range(self.psiindex):
+          tL = LeftTransferManaged(self.psi,0,'l',self.psilist[i],
+            manager=manager)
+          self.dottransferL[i] = [tL]
+          yield tL
+      else:
+        for tlist in self.ltransflist:
+          tL = tlist[-1].right()
+        tL = self.transfLs[-1].right()
+      self.transfLs.append(tL)
+      self.ntransfL += 1
+      return tL
+    else:
+      assert n < self.ntransfL
+      return (tlist[n] for tlist in self.ltransflist)
+
+  def discardleft(self):
+    # Discard (rightmost) left transfer matrix
+    self.logger.info('Discarding left transfer matrix (%d)',self.ntransfL-1)
+    for tlist in self.ltransflist:
+      tlist.pop().discard()
+    self.ntransfL -= 1
+
+  def discardright(self):
+    # Discard (leftmost) right transfer matrix
+    self.logger.info('Discarding right transfer matrix (%d)',self.N-self.ntransfR)
+    for tlist in self.rtransflist:
+      tlist.pop(0).discard()
+    self.ntransfR -= 1
+
+  def compare1(self, niter):
+    if niter == 0:
+      config.streamlog.log(30, 'Single update')
+    self.getE()
+    Ediff = self.E-self.E0
+    self.logger.log(20, '[%s]  energy diff %s', niter, Ediff)
+    config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10f',niter,Ediff,self.E)
+    return abs(Ediff)
+
+  def doubleupdateleft(self):
+    # TODO better way of handling transfer
+    tR = self.gettransfR(3).left()
+    #tR.discard = True
+    self.logger.log(12, 'left edge double update')
+    self.H.DMRG_opt_double_left(self.psi, self.chi, tR, self.settings['tol2'])
+    tR.discard()
+    #self.gettransfL(0)
+
+  def doubleupdateright(self):
+    # TODO better way of handling transfer
+    tL = self.gettransfL(self.N-4).right()
+    #tL.discard = True
+    self.logger.log(12, 'right edge double update')
+    self.H.DMRG_opt_double_right(self.psi, self.chi, tL, self.settings['tol2'])
+    tL.discard()
+    #self.gettransfR(self.N-1)
+
+  def doubleupdate(self, n, direction):
+    self.logger.log(15, 'site %s double update (%s)', n, direction)
+    if direction == 'r':
+      while n+2 > self.N-self.ntransfR:
+        self.discardright()
+    else:
+      while n < self.ntransfL:
+        self.discardleft()
+    tR = self.gettransfR(n+2)
+    tL = self.gettransfL(n-1)
+    self.H.DMRG_opt_double(self.psi, n, self.chi,
+        tL,tR,None,direction=='r', self.settings['tol2'], self.eigtol)
+    if direction == 'r':
+      self.discardright()
+    else:
+      self.discardleft()
+
+  def singleupdateleft(self):
+    tR = self.gettransfR(2).left()
+    #tR.discard = True
+    self.logger.log(10, 'left edge single update')
+    mat = self.H.DMRG_opt_single_left(self.psi, tR, self.settings['tol1'])
+    tR.discard()
+    return mat.diag_mult('l', self.psi.getschmidt(0))
+
+  def singleupdateright(self, gauge):
+    tL = self.gettransfL(self.N-3).right()
+    #tL.discard = True
+    self.logger.log(10, 'right edge single update')
+    mat = self.H.DMRG_opt_single_right(self.psi, tL, self.settings['tol2'])
+    tL.discard()
+    #self.transfRs = [self.H.getboundarytransfright(self.psi)]
+    return mat
+
+  def singleupdate(self, n, direction, gauge):
+    self.logger.log(12, 'site %s single update (%s)', n, direction)
+    right = direction == 'r'
+    if right:
+      while n+1 > self.N-self.ntransfR:
+        self.discardright()
+    else:
+      while n < self.ntransfL:
+        self.discardleft()
+    tR = self.gettransfR(n+1)
+    tL = self.gettransfL(n-1)
+    gL,gR = (gauge, None) if right else (None, gauge)
+    mat = self.H.DMRG_opt_single(self.psi, n, tL, tR,
+        right, gL, gR, self.settings['tol1'], self.eigtol)
+    if right:
+      mat = mat.diag_mult('l',self.psi.getschmidt(n))
+    if right:
+      self.discardright()
+    else:
+      self.discardleft()
+    #  self.transfRs.pop(0)
+    #  self.transfLs.append(self.transfLs[-1].right())
+    #else:
+    #  self.transfLs.pop()
+    #  self.transfRs.insert(0, self.transfRs[0].left())
+    return mat
+
+  def gauge_at(self, site, gauge, direction='r'):
+    self.logger.log(10, 'gauging tensor at site %s', site)
+    if direction == 'r':
+      self.psi.rgauge(gauge,site)
+    else:
+      self.psi.lgauge(gauge,site)
+
+  def run(self):
+    if self.supstatus == 'complete':
+      print('Optimization already completed')
+      return self.psi,self.E
+    if not self.supervisors:
+      # Initialize base
+      self.logger.log(10, 'Initializing base supervisor')
+      self.supervisors.append(self.supfunctions['base'](self.chis, self.N, self.settings))
+      self.suplabels.append('base')
+      self.supstatus.append(None)
+    elif self.supervisors == 'paused':
+      self.logger.log(10, 'Resuming base supervisor')
+      self.logger.log(5, 'Using state %s', self.supstatus[0])
+      config.streamlog.log(30, 'Resuming: chi = % 3d (#%s)', self.chi, self.chiindex)
+      # Initialize saved supervisors
+      sup = self.supfunctions['base'](self.chis, self.N, self.settings, state=self.supstatus[0])
+      self.supervisors = [sup]
+      level = 0
+      while len(self.supervisors) < len(self.supstatus):
+        cmd,(label,*args),status = next(sup)
+        assert cmd == 'runsub' and label == self.suplabels[level+1]
+        if self.supstatus[level] != status:
+          self.logger.log(25, 'Supervisor %s status %s superceded as %s',
+            label, self.supstatus[level], status)
+          self.supstatus[level] = status
+        level += 1
+        self.logger.log(10, 'Resuming level-%s supervisor %s',level+1,label)
+        self.logger.log(5, 'Using arguments %s', args)
+        sup = self.supfunctions[label](*args, self.settings, state=self.supstatus[level])
+        self.supervisors.append(sup)
+    level = len(self.supervisors)
+    sendval = None
+    while level > 0:
+      # Next step from current subroutine
+      cmd,args,*status = self.supervisors[-1].send(sendval)
+      self.logger.log(8, 'Received %s command from supervisor %s',
+        cmd, self.suplabels[-1])
+      sendval = None # Default to not sending anything
+      if status:
+        # Candidate save checkpoint--includes supervisor status
+        self.logger.log(8, 'Setting status to %s', status)
+        self.supstatus[-1], = status
+        if self.filename:
+          savequit = self.savecheckpoint(level)
+          if savequit:
+            import sys
+            sys.exit()
+      # Options for cmd
+      if cmd == 'complete':
+        # Subroutine completed execution
+        self.supervisors.pop()
+        self.supstatus.pop()
+        label = self.suplabels.pop()
+        level -= 1
+        if args:
+          # Pass arguments up the chain
+          sendval = args
+        self.logger.log(10, 'Supervisor %s complete',label)
+      elif cmd == 'runsub':
+        # New sub-supervisor 
+        label,*supargs = args
+        subsup = self.supfunctions[label](*supargs, self.settings)
+        self.supervisors.append(subsup)
+        self.supstatus.append(None)
+        self.suplabels.append(label)
+        level += 1
+        self.logger.log(10, 'Starting level-%s supervisor %s',level,label)
+      else:
+        # Algorithm-specific options
+        sendval = self.supcommands[cmd](*args)
+    self.supstatus = 'complete'
+    self.save()
+    return self.psi, self.E

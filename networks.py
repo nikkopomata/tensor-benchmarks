@@ -43,6 +43,7 @@ class Network:
     self._tree = None
     self._cache = cached
 
+  # TODO structured/un-parsed version
   @classmethod
   def network(cls, parsestr, *tensors, compat=True, cached=False):
     """Initialize tensor network, with structure given by parsestr

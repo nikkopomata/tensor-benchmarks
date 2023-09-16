@@ -810,3 +810,5 @@ class MPSirrep(MPS):
     if self._matrices[n]._irrep != self._irrep:
       print(f'charged matrix at {n} transforms under {self._matrices[n]._irrep} instead of expected (non-trivial) {self._irrep}')
     super().printcanon(compare)
+
+# TODO transfer-matrix-fetching methods
