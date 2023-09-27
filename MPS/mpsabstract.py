@@ -1036,7 +1036,7 @@ class TransferMatrix(ABC):
     self.psi = psi
     self.site = site
     if len(Ops) and isinstance(Ops[-1], MPSgeneric):
-      self._psi2 = Ops.pop()
+      self._psi2,Ops = Ops[-1],Ops[:-1]
     else:
       self._psi2 = None
     self.operators = Ops
@@ -1053,6 +1053,21 @@ class TransferMatrix(ABC):
     else:
       self.T = None
 
+  def conj(self):
+    # Call constructor
+    if self._psi2 is None:
+      args = (self.psi,self.site,self._schmidtdir)
+    else:
+      args = (self._psi2,self.site,self._schmidtdir,self.psi)
+    kw_args = dict(manager=self.manager) if hasattr(self,'manager') else {}
+    cpy = self.__class__(*(args+self.operators),**kw_args)
+    if self.T is not None:
+      T = self.T
+      legflip = {'t':'b','b':'t'}
+      legflip.update({self.opidxs[i]:self.opidxs[self.depth-i-1] for i in range(self.depth)})
+      cpy.T = T.renamed(legflip).conj()
+    return cpy
+      
   def sitetensors(self, fparity=None):
     if self._schmidtdir == 'l':
       psiTs = (self.ket.getTL(self.site),self.bra.getTL(self.site))
@@ -1063,11 +1078,11 @@ class TransferMatrix(ABC):
   def compute(self, T0, fparity=None):
     # T0 is previous tensor; if boundary pass None
     # fparity is diagonal of fermionic parity matrix; applied to bra
-    assert set(self.idxs) == T0.idxset
     self.checkcanon()
     if T0 is None:
-      net = networks.Network.network(self.netconstructor(starter=True),self.sitetensors(fparity=fparity))
+      net = networks.Network.network(self.netconstructor(starter=True),*self.sitetensors(fparity=fparity))
     else:
+      assert set(self.idxs) == T0.idxset
       net = networks.Network.network(self.netconstructor(),T0,*self.sitetensors(fparity=fparity))
     if fparity is not None:
       net['bra'] = net['bra'].diag_mult('b',fparity)
@@ -1227,6 +1242,7 @@ class LeftTransfer(TransferMatrix):
     assert self._schmidtdir == 'l'
     self.T = self.T.mat_mult('t-l',M).mat_mult('b-l*',M)
 
+# TODO multiple inheritance from a `ManagedTransfer'?
 class LeftTransferManaged(LeftTransfer):
   def initnext(self):
     ops = list(self.operators)
@@ -1237,7 +1253,10 @@ class LeftTransferManaged(LeftTransfer):
 
   @property
   def T(self):
-    return self.manager.database[self.id.hex]
+    if self.id.hex in self.manager.database:
+      return self.manager.database[self.id.hex]
+    else:
+      return None
 
   @T.setter
   def T(self, value):
@@ -1358,12 +1377,15 @@ class RightTransferManaged(RightTransfer):
     if self._psi2 is not None:
       ops.append(self._psi2)
     return RightTransferManaged(self.psi,self.site-1,self._schmidtdir,
-      ops, manager=self.manager)
+      *ops, manager=self.manager)
 
   @property
   def T(self):
     #with self.manager.shelfcontext() as shelf:
-    return self.manager.database[self.id.hex]
+    if self.id.hex in self.manager.database:
+      return self.manager.database[self.id.hex]
+    else:
+      return None
 
   @T.setter
   def T(self, value):

@@ -836,10 +836,13 @@ class DMRGManager:
     else:
       self.psi.lgauge(gauge,site)
 
+  def returnvalue(self):
+    return self.psi, self.E
+
   def run(self):
     if self.supstatus == 'complete':
       print('Optimization already completed')
-      return self.psi,self.E
+      return self.returnvalue()
     if not self.supervisors:
       # Initialize base
       self.logger.log(10, 'Initializing base supervisor')
@@ -908,7 +911,7 @@ class DMRGManager:
         sendval = self.supcommands[cmd](*args)
     self.supstatus = 'complete'
     self.save()
-    return self.psi, self.E
+    return self.returnvalue()
 
 def baseSupervisor(chis, N, settings, state=None):
   if state is None:
@@ -1105,18 +1108,74 @@ class PseudoShelf(MutableMapping):
         if f[:-2] == '.p':
           shutil.copy2(os.path.join(d,f),os.path.join(self.path,f))
 
+def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
+    override=True, override_chis=True, resume_from_old=False, use_shelf=False,
+    **dmrg_kw):
+  """Initialize optimization manager
+  (unpickle if saved, create otherwise)
+  'override' tells manager to replace settings if different in restored manager
+    (except where to save, will need different function for that)
+  'override_chis' tells manager to replace bond dimensions
+    (if False, list of chis must be equal)
+    If current bond dimension might not be in list, can pass
+      'lower' to make the algorithm select the next-lowest, or
+      'higher' to make the algorithm select the next-highest
+  'resume_from_old' indicates that the filename may point to a saved status
+    consisting of (psi, (chi, single_or_double, niter))
+  remaining arguments  as in DMRGManager()"""
+  if savefile and (savefile != 'auto' or file_prefix):
+    # Check existing
+    filename = (file_prefix+'.p') if savefile=='auto' else savefile
+    if os.path.isfile(filename):
+      if isinstance(chis, int):
+        chis = [chis]
+      config.streamlog.warn('Reloading manager from %s',filename)
+      Mngr = pickle.load(open(filename,'rb'))
+      if override_chis:
+        # Reset bond dimension list
+        useas = override_chis if isinstance(override_chis,str) else None
+        Mngr.resetchis(chis, use_as=useas)
+        assert npsis >= Mngr.npsis
+        Mngr.npsi_tot = npsis
+      else:
+        assert chis == Mngr.chis
+        assert npsis == Mngr.npsi_tot
+      if Mngr.filename != filename:
+        config.streamlog.warn('Updating save destination from %s to %s',
+          Mngr.filename, filename)
+        Mngr.filename = filename
+        Mngr.saveprefix = file_prefix
+      if override:
+        # Additionally reset general settings
+        dmrg_kw.pop('psi0',None)
+        Mngr.resetsettings(dmrg_kw)
+        if use_shelf:
+          Mngr.setdbon()
+        else:
+          Mngr.setdboff(False)
+      return Mngr
+  return DMRGOrthoManager(Hamiltonian, chis, npsis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
+
+
 class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
-  def __init__(self, Hamiltonian, chis, npsis, **kw_args):
+  def __init__(self, Hamiltonian, chis, npsis, ortho_tol=1e-7, keig=1,
+      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,**kw_args):
     self.psiindex = 0
-    self.npsis = npsis
-    self.psilist = npsis*[None]
-    self.dottransferR = []
-    self.dottransferL = []
-    self.transfcache = {}
-    self.dottransfcache = {}
+    self.npsi_tot = npsis
+    self.npsis = 1
+    self.psilist = [None]
+    self.dottransferR = {}
+    self.dottransferL = {}
+    self.transfcacheL = {}
+    self.transfcacheR = {}
+    self.Es = [None]
+    self.s0s = [None]
+    self.E0s = [None]
     super().__init__(Hamiltonian, chis, **kw_args)
     self.__version = '0'
+    self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
+      newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein)
 
   @property
   def psi(self):
@@ -1126,74 +1185,341 @@ class DMRGOrthoManager(DMRGManager):
   def psi(self, value):
     self.psilist[self.psiindex] = value
 
+  @property
+  def E(self):
+    return self.Es[self.psiindex]
+
+  @E.setter
+  def E(self, value):
+    self.Es[self.psiindex] = value
+
+  @property
+  def E0(self):
+    return self.E0s[self.psiindex]
+
+  @E0.setter
+  def E0(self, value):
+    self.E0s[self.psiindex] = value
+
+  @property
+  def schmidt0(self):
+    return self.s0s[self.psiindex]
+
+  @schmidt0.setter
+  def schmidt0(self, value):
+    self.s0s[self.psiindex] = value
+
   def _initfuncs(self):
     super()._initfuncs()
     # Labels for supervisors
-    self.supfunctions['base'] = baseOrthoSupervisor
+    self.supfunctions['double'] = doubleOrthoSupervisor
+    self.supfunctions['single'] = singleOrthoSupervisor
     # Labels for bound methods
+    self.supcommands['addstatecond'] = self.check_add_state
+    self.supcommands['newstate'] = self.newstate_center
+    self.supcommands['select'] = self.selectpsi
+    self.supcommands['clearall'] = self.clearcache
 
   def savestep(self):
-    """Save output after optimizing a single state"""
-    self.logger.log(20,'Saving completed state #%d',self.psiidx)
-    pickle.dump((self.psi,self.E),open(f'{self.saveprefix}n{self.psiidx}.p','wb'))
+    """Save output after completing bond-dimension optimization"""
+    self.logger.log(20,'Saving states with bond dimension %d',self.chi)
+    for i in range(self.npsis):
+      pickle.dump((self.psilist[i],self.Es[i]),open(f'{self.saveprefix}c{self.chi}n{self.psiindex}.p','wb'))
+
+  def check_add_state(self, niter, delta):
+    if self.npsis == 1 and delta is None:
+      # TODO setting for not-already-initialized state?
+      return 1,True
+    if self.npsis < self.npsi_tot and niter == self.settings['nsweep2']-1:
+      return self.npsis,True
+    return self.npsis, (self.npsi_tot > self.npsis and delta is not None and delta < self.settings['newthresh'])
+
+  def flushtransferleft(self, site):
+    """Remove or recalculate transfer vectors to get to correct site
+    Unlike getlefttransfers, assumes any existing/cached are valid"""
+    n = site+1
+    self.logger.info('Flushing left transfer lists to site %d (length %d)',
+      site,n)
+    for itr,tL in enumerate(self.ltransflist):
+      while len(tL) > n:
+        # Longer than needed
+        tL.pop().discard()
+      if n and not len(tL):
+        # Initialize
+        if itr == 0:
+          tL.append(self.H.getboundarytransfleft(self.psi, manager=self))
+        else:
+          i,j = self.collected_pairs()[itr-1]
+          tL.append(LeftTransferManaged(self.psilist[j],0,'l',self.psilist[i],
+            manager=self))
+          tL[-1].compute(None)
+      while len(tL) < n:
+        tL.append(tL[-1].right())
+    self.ntransfL = n
+
+  def flushtransferright(self, site):
+    n = self.N-site
+    self.logger.info('Flushing right transfer lists to site %d (length %d)',
+      site,n)
+    for itr,tR in enumerate(self.rtransflist):
+      while len(tR) > n:
+        # Longer than needed
+        tR.pop(0).discard()
+      if n and not len(tR):
+        # Initialize
+        if itr == 0:
+          tR.append(self.H.getboundarytransfright(self.psi,manager=self))
+        else:
+          i,j = self.collected_pairs()[itr-1]
+          tR.append(RightTransferManaged(self.psilist[j],self.N-1,'r',
+            self.psilist[i],manager=self))
+          tR[0].compute(None)
+      while len(tR) < n:
+        tR.insert(0,tR[0].left())
+    self.ntransfR = n
+
+  def clearcache(self):
+    for tll in (self.ltransflist,self.rtransflist,self.transfcacheL.values(),self.transfcacheR.values()):
+      for tlist in tll:
+        while len(tlist) > 0:
+          tlist.pop().discard()
+          
+  def selectpsi(self, index, flush_to, log=True):
+    if log:
+      self.logger.info('Selecting state #%d',index)
+    if index == self.psiindex:
+      if flush_to is not None:
+        # Check that correct transfers are there
+        fleft,fright = flush_to
+        self.flushtransferleft(fleft)
+        self.flushtransferright(fright)
+      return self.npsis
+    self.transfcacheL[self.psiindex] = self.transfLs
+    self.transfcacheR[self.psiindex] = self.transfRs
+    if index in self.transfcacheL:
+      self.transfLs = self.transfcacheL.pop(index)
+    else:
+      self.transfLs = []
+    if index in self.transfcacheR:
+      self.transfRs = self.transfcacheR.pop(index)
+    else:
+      self.transfRs = []
+    if flush_to is not None:
+      fleft,fright = flush_to
+    else:
+      fleft = len(self.transfLs)-1
+      fright = self.N-len(self.transfRs)
+    dottL = self.dottransferL
+    dottR = self.dottransferR
+    self.dottransferL = {}
+    self.dottransferR = {}
+    self.psiindex = index
+    for i,j in self.collected_pairs():
+      # check: already in `active' transfer list?
+      tLs = []
+      c = False
+      if (i,j) in dottL:
+        tLs = dottL.pop((i,j))
+      elif (j,i) in dottL:
+        tLs = dottL.pop((j,i))
+        c = True
+      elif (i,j) in self.transfcacheL:
+        tLs = self.transfcacheL.pop((i,j))
+      elif (j,i) in self.transfcacheR:
+        tLs = self.transfcacheL.pop((j,i))
+        c = True
+      if c:
+        for n in range(len(tLs)):
+          T = tLs[n]
+          tLs[n] = T.conj()
+          T.discard()
+      self.dottransferL[i,j] = tLs
+      tRs = []
+      c = False
+      if (i,j) in dottR:
+        tLs = dottR.pop((i,j))
+      elif (j,i) in dottR:
+        tRs = dottR.pop((j,i))
+        c = True
+      elif (i,j) in self.transfcacheR:
+        tRs = self.transfcacheR.pop((i,j))
+      elif (j,i) in self.transfcacheR:
+        tRs = self.transfcacheR.pop((j,i))
+        c = True
+      if c:
+        for n in range(len(tRs)):
+          T = tRs[n]
+          tRs[n] = T.conj()
+          T.discard()
+      self.dottransferR[i,j] = tRs
+    self.flushtransferleft(fleft)
+    self.flushtransferright(fright)
+    self.transfcacheL.update(dottL)
+    self.transfcacheR.update(dottR)
+    return self.npsis
 
   # TODO initialization for next states
   # def initstate(self):
+  def compare1(self, niter, which='all'):
+    i0 = self.psiindex
+    if which is None:
+      which = i0
+    if niter == 0 and (which == 'all' or which == 0):
+      # TODO 'announce' routine
+      config.streamlog.log(30, 'Single update')
+    if which == 'all':
+      dEtot = 0
+      for i in self.npsis:
+        self.selectpsi(i,(-1,1),log=False)
+        self.getE()
+        Ediff = self.E-self.E0
+        self.logger.log(20, f'[% 3d]#%d %+12.4g E=%0.10f',niter,i,Ediff,self.E)
+        dEtot += abs(Ediff)
+      dEtot /= self.npsis
+      self.streamlog.log(30,f'[% 3d] %12.4g',niter,dEtot)
+    else:
+      self.selectpsi(which,(-1,1),log=False)
+      self.getE()
+      Ediff = self.E-self.E0
+      config.streamlog.log(30, f'[% 3d]#%d %+12.4g E=%0.10f',niter,which,Ediff,self.E)
+      dEtot = abs(Ediff)
+    self.selectpsi(i0,(-1,1),log=False)
+    return dEtot
+
+  def compare2(self, niter, which='all'):
+    i0 = self.psiindex
+    if which is None:
+      which = i0
+    if niter == 0 and (which == 'all' or which == 0):
+      config.streamlog.log(30, 'Double update')
+      # TODO 'announce' routine
+    if which == 'all':
+      dEtot = 0
+      Ldtot = 0
+      for i in range(self.npsis):
+        self.selectpsi(i,(-1,2),log=False)
+        self.getE()
+        Ldiff = 0
+        Ediff = self.E-self.E0
+        dEtot += abs(Ediff)
+        # TODO factor out L diff calculation
+        for n,l0 in enumerate(self.s0s[i]):
+          l1 = self.psilist[i]._schmidt[n]
+          if isinstance(l0, dict):
+            # Dictionary by charge sector
+            viter = self.psilist[i].getbond(n).full_iter()
+            l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+            for k in set(l1).intersection(set(l0)):
+              Ldiff += adiff(l0[k],l1[k])
+            for k in set(l1) - set(l0):
+              Ldiff += np.linalg.norm(l1[k])
+            for k in set(l0) - set(l1):
+              Ldiff += np.linalg.norm(l0[k])
+          else:
+            Ldiff += adiff(l0,l1)
+            l1 = copy(l1)
+          self.s0s[i][n] = l1
+        Ldtot += Ldiff/self.npsis
+        # Update history
+        self.logger.log(20, f'[% 3d]#%d %10.4g %+10.4g E=%0.10f',niter,i,Ldiff,Ediff,self.E)
+      dEtot /= self.npsis
+      config.streamlog.log(30,f'[% 3d] %12.4g %12.4g',niter,Ldtot,dEtot)
+    else:
+      self.selectpsi(which,(-1,2),log=False)
+      self.getE()
+      Ediff = self.E-self.E0
+      dEtot = abs(Ediff)
+      Ldiff = 0
+      for n,l0 in enumerate(self.s0s[which]):
+        l1 = self.psilist[which]._schmidt[n]
+        if isinstance(l0, dict):
+          # Dictionary by charge sector
+          viter = self.psilist[which].getbond(n).full_iter()
+          l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+          for k in set(l1).intersection(set(l0)):
+            Ldiff += adiff(l0[k],l1[k])
+          for k in set(l1) - set(l0):
+            Ldiff += np.linalg.norm(l1[k])
+          for k in set(l0) - set(l1):
+            Ldiff += np.linalg.norm(l0[k])
+        else:
+          Ldiff += adiff(l0,l1)
+          l1 = copy(l1)
+        self.s0s[which][n] = l1
+      config.streamlog.log(30, f'[% 3d]#%d %10.4g %+10.4g E=%0.10f',niter,which,Ldiff,Ediff,self.E)
+      # Update history
+      Ldtot = Ldiff
+    self.selectpsi(i0,(-1,2),log=False)
+    return Ldtot
+
+  def newstate_center(self):
+    # Initialize with previous
+    config.streamlog.log(30,'[ Adding state #%d ]', self.npsis)
+    site = self.N//2-1
+    self.logger.info('Initializing state #%d with double update at site %d',
+      self.npsis,site)
+    self.npsis += 1 
+    self.psilist.append(copy(self.psilist[-1]))
+    self.Es.append(self.Es[-1])
+    self.E0s.append(None)
+    self.s0s.append(None)
+    self.selectpsi(self.npsis-1,(site-1,site+2))
+    #self.getrighttransfers(site+2)
+    #self.getlefttransfers(site-1)
+    self.doubleupdate(site,'r')
+    self.logger.info('Completing by imposing canonical form')
+    self.restorecanonical()
+    self.getrighttransfers(2)
+  
+  def collected_pairs(self):
+    # All pairs of states represented in transfer matrices
+    # TODO make dependent on callable
+    return [(self.psiindex,i) for i in range(self.npsis) if i != self.psiindex]
 
   def getrighttransfers(self, n0):
-    self.logger.log(20, 'Collecting right transfer matrices')
-    self.database.clear()
+    self.logger.log(20, 'Collecting right transfer matrices (to site %d)',n0)
+    #TODO be more deliberate about when clearing database
+    for n in range(self.ntransfR):
+      self.transfRs[n].discard()
+      for idx in self.dottransferR:
+        self.dottransferR[idx][n].discard()
+    for n in range(self.ntransfL):
+      self.transfLs[n].discard()
+      for idx in self.dottransferL:
+        self.dottransferL[idx][n].discard()
+    #self.database.clear()
     self.transfRs = self.H.right_transfer(self.psi, n0, collect=True, manager=self)
     self.transfLs = []
     self.ntransfR = len(self.transfRs)
     self.ntransfL = 0
-    self.dottransferL = []
-    self.dottransferR = []
-    for i in range(self.psiindex):
-      self.dottransferL.append([])
-      phi = self.psilist[i]
-      tR = RightTransferManaged(self.psi, self.N-1, 'r', phi, manager=self)
-      self.dottransferR.append(tR.moveby(self.N-1-n0,collect=True)[::-1])
+    self.dottransferL = {}
+    self.dottransferR = {}
+    # TODO callable for options for which transfers to track
+    #for i in range(self.psiindex):
+    for i,j in self.collected_pairs():
+      self.dottransferL[i,j] = []
+      phi,psi = self.psilist[i],self.psilist[j]
+      tR = RightTransferManaged(psi, self.N-1, 'r', phi, manager=self)
+      tR.compute(None)
+      self.dottransferR[i,j] = tR.moveby(self.N-1-n0,collect=True)[::-1]
 
-  def setdbon(self):
-    dbpath = self.filename[:-1]+'d'
-    if not self.dbpath:
-      self.logger.warn('Transferring transfer tensors to shelf...')
-      # Create database
-      database = PseudoShelf(dbpath)
-      database.update(self.database)
-      del self.database
-      self.database = database
-      self.dbpath = dbpath
-      self.logger.debug('Shelf created at %s',dbpath)
-      self.save()
-    elif dbpath != self.dbpath:
-      self.logger.info('Copying shelf from %s to %s',dbpath,self.dbpath)
-      if isinstance(self.database,PseudoShelf):
-        self.dbpath = dbpath
-        try:
-          self.database.copyto(dbpath)
-        except FileNotFoundError:
-          self.logger.warn('Shelf directory not found, repopulating %d left and '
-            '%d right transfer vectors', self.ntransfL,self.ntransfR)
-          self.regenerate()
-      else:
-        self.database = PseudoShelf(dbpath)
-        try:
-          self.database.update(self.dbpath)
-        except FileNotFoundError:
-          self.logger.warn('Shelf directory not found, repopulating %d left and '
-            '%d right transfer vectors', self.ntransfL,self.ntransfR)
-          self.regenerate()
-      # Move database
-      self.save()
-    else:
-      self.logger.debug('Shelf already in place')
-    try:
-      self.checkdatabase()
-    except AssertionError:
-      self.logger.exception('Error checking database; recomputing transfers')
-      self.regenerate()
+  def getlefttransfers(self, n0):
+    # Only clear left here
+    for n in range(self.ntransfL):
+      self.transfLs[n].discard()
+      for idx in self.dottransferL:
+        self.dottransferL[idx][n].discard()
+    self.logger.log(20, 'Collecting left transfer matrices (to site %d)',n0)
+    self.transfLs = self.H.left_transfer(self.psi, n0, collect=True, manager=self)
+    self.ntransfL = len(self.transfLs)
+    self.dottransferL = {}
+    # TODO callable for options for which transfers to track
+    #for i in range(self.psiindex):
+    for i,j in self.collected_pairs():
+      phi,psi = self.psilist[i],self.psilist[j]
+      tL = LeftTransferManaged(psi, 0, 'l', phi, manager=self)
+      tL.compute(None)
+      self.dottransferL[i,j] = tL.moveby(n0-1,collect=True)
 
   def regenerate(self):
     if self.ntransfR:
@@ -1201,7 +1527,7 @@ class DMRGOrthoManager(DMRGManager):
       self.transfRs[-1].compute(None)
       for nr in range(self.ntransfR-2,-1,-1):
         self.transfRs[nr].compute(self.transfRs[nr+1].T)
-      for dotR in self.dottransferR:
+      for dotR in self.dottransferR.values():
         dotR[-1].compute(None)
         for nr in range(self.ntransfR-2,-1,-1):
           dotR[nr].compute(dotR[nr+1].T)
@@ -1209,10 +1535,10 @@ class DMRGOrthoManager(DMRGManager):
       self.transfLs[0].compute(None)
       for nl in range(1,self.ntransfL):
         self.transfLs[nl].compute(self.transfLs[nl-1].T)
-      for dotL in self.dottransferL:
+      for dotL in self.dottransferL.values():
         dotL[0].compute(None)
         for nl in range(1,self.ntransfL):
-          dotR[nl].compute(dotR[nl-1].T)
+          dotL[nl].compute(dotR[nl-1].T)
 
   def checkdatabase(self):
     self.logger.debug('Checking database and restoring entries as necessary')
@@ -1223,11 +1549,11 @@ class DMRGOrthoManager(DMRGManager):
     else:
       keys = set(self.database)
     if self.ntransfR:
-      for idx,tR in enumerate(self.dottransfR+[self.transfRs]):
-        if idx == self.psiindex:
+      for idx,tR in enumerate(self.rtransflist):
+        if idx == 0:
           state = 'H'
         else:
-          state = idx
+          state = idx-1
         if tR[-1].id.hex not in keys:
           self.logger.warn('Right boundary transfer vector (%s) missing; restoring',state)
           tR[-1].compute(None)
@@ -1239,11 +1565,11 @@ class DMRGOrthoManager(DMRGManager):
             tR[-n-1].compute(tR[-n].T)
         assert len(tR) == self.ntransfR
     if self.ntransfL:
-      for idx,tL in enumerate(self.dottransfL+[self.transfLs]):
-        if idx == self.psiindex:
+      for idx,tL in enumerate(self.ltransflist):
+        if idx == 0:
           state = 'H'
         else:
-          state = idx
+          state = idx-1
         if tL.id.hex not in keys:
           self.logger.warn('Left boundary transfer vector (%s) missing; restoring',state)
           tL.compute(None)
@@ -1253,69 +1579,82 @@ class DMRGOrthoManager(DMRGManager):
               'restoring',n,state)
           tL[n].compute(tL[n-1].T)
         assert len(tL) == self.ntransfL
-      valid_keys = {t.id.hex for tlist in ([self.transfLs,self.transfRs]+self.dottransferR+self.dottransferL) for t in tlist}
+      valid_keys = {t.id.hex for tlist in (self.rtransflist+self.ltransflist) for t in tlist}
       for k in keys - valid_keys:
         self.logger.info('Removing unidentified key %s',k)
         del self.database[k]
       self.logger.log(8,'%d valid keys (%d), %d left transfers, %d right transfers, state #%d',len(valid_keys),len(self.database),self.ntransfL,self.ntransfR,self.psiindex)
-    assert len(self.database) == (self.psiindex+1)*(self.ntransfL + self.ntransfR)
+    assert len(self.database) == (self.npsis)*(self.ntransfL + self.ntransfR)
+    # TODO change to match collection setting
 
   @property
   def rtransflist(self):
-    return [self.transfRs]+self.dottransferR
+    return [self.transfRs]+[self.dottransferR[idx] for idx in self.collected_pairs()]
 
   @property
   def ltransflist(self):
-    return [self.transfLs]+self.dottransferL
+    return [self.transfLs]+[self.dottransferL[idx] for idx in self.collected_pairs()]
 
-  def gettransfR(self, n):
+  def gettransfR(self, n, which=None):
+    """Transfer matrix at site n; Hamiltonian if which is None,
+    identified pair otherwise"""
     # TODO combine options with proxy context manager?
-    self.logger.debug('Fetching right transfer %d',n)
+    self.logger.debug('Fetching site %d right transfers (%s) (of %d presently)',n,which,self.ntransfR)
     if n == self.N-self.ntransfR-1:
       # Compute transfer
+      self.logger.log(15,'Computing site %d right transfers',n)
       if self.ntransfR == 0:
         tR = self.H.getboundarytransfright(self.psi, manager=self)
         self.transfRs = [tR]
-        yield tR
-        for i in range(self.psiindex):
-          tR = RightTransferManaged(self.psi,self.N-1,'r',self.psilist[i],
-            manager=manager)
-          self.dottransferR[i] = [tR]
-          yield tR
+        #yield tR
+        for i,j in self.collected_pairs():
+          tR = RightTransferManaged(self.psilist[j],self.N-1,'r',
+            self.psilist[i], manager=self)
+          tR.compute(None)
+          self.dottransferR[i,j] = [tR]
+          #yield tR
       else:
         for tlist in self.rtransflist:
           tR = tlist[0].left()
-          yield tR
+          #yield tR
           tlist.insert(0,tR)
       self.ntransfR += 1
-      return tR
+      #return
+    nm = n-(self.N-self.ntransfR)
+    assert nm >= 0
+    if which is None:
+      return self.transfRs[nm]
     else:
-      assert n > self.N-self.ntransfR-1
-      return (tlist[n-(self.N-self.ntransfR)] for tlist in self.rtransflist)
+      return self.dottransferR[which][nm]
 
-  def gettransfL(self, n):
-    self.logger.debug('Fetching left transfer %d',n)
+  def gettransfL(self, n, which=None):
+    self.logger.debug('Fetching site %d left transfers (%s) (of %d presently)',n,which,self.ntransfL)
     if n == self.ntransfL:
+      self.logger.log(15, 'Computing site %d left transfers',n)
       # Compute transfer
       if self.ntransfL == 0:
         tL = self.H.getboundarytransfleft(self.psi, manager=self)
         self.transfLs = [tL]
-        yield tL
-        for i in range(self.psiindex):
-          tL = LeftTransferManaged(self.psi,0,'l',self.psilist[i],
-            manager=manager)
-          self.dottransferL[i] = [tL]
-          yield tL
+        #yield tL
+        for i,j in self.collected_pairs():
+          tL = LeftTransferManaged(self.psilist[j],0,'l',self.psilist[i],
+            manager=self)
+          tL.compute(None)
+          self.dottransferL[i,j] = [tL]
+        # yield tL
       else:
         for tlist in self.ltransflist:
           tL = tlist[-1].right()
-        tL = self.transfLs[-1].right()
-      self.transfLs.append(tL)
+          tlist.append(tL)
+        #tL = self.transfLs[-1].right()
+        #self.transfLs.append(tL)
       self.ntransfL += 1
-      return tL
+      #eturn
+    assert n <= self.ntransfL
+    if which is None:
+      return self.transfLs[n]
     else:
-      assert n < self.ntransfL
-      return (tlist[n] for tlist in self.ltransflist)
+      return self.dottransferL[which][n]
 
   def discardleft(self):
     # Discard (rightmost) left transfer matrix
@@ -1332,6 +1671,7 @@ class DMRGOrthoManager(DMRGManager):
     self.ntransfR -= 1
 
   def compare1(self, niter):
+    # TODO energy comparison: individual or all together?
     if niter == 0:
       config.streamlog.log(30, 'Single update')
     self.getE()
@@ -1340,23 +1680,83 @@ class DMRGOrthoManager(DMRGManager):
     config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10f',niter,Ediff,self.E)
     return abs(Ediff)
 
+  def ortho_vectors(self, site, nsites):
+    right = site+nsites == self.N
+    left = site == 0
+    for i,j in self.collected_pairs():
+      phi = self.psilist[j]
+      if i != self.psiindex:
+        continue
+      self.logger.debug('protecting orthogonality of %d (current) w/ %d: site(s) %s', i, j, tuple(range(site,site+nsites)))
+      T0 = phi.getTL(site)
+      if not (nsites==1 and right):
+        T0 = T0.diag_mult('r',phi.getschmidt(site))
+      if nsites == 2:
+        Tr = phi.getTR(site+1)
+        T0 = T0.contract(Tr,'r-l;b>bl,~;b>br,~')
+      T = T0.conj()
+      if not left:
+        L = self.gettransfL(site-1,(i,j))
+        self.logger.debug('left at %d',L.site)
+        T = T.contract(L.T, 'l-t;~;b>l*')
+      if not right:
+        R = self.gettransfR(site+nsites,(i,j))
+        self.logger.debug('right at %d',R.site)
+        T = T.contract(R.T,'r-t;~;b>r*')
+      yield T.conj()
+      
+  def optimize_tensor(self, Heff, site, nsites, gauge=None):
+    # Project out vectors
+    self.logger.info('Optimizing site %d, %d-site update',site,nsites)
+    Heff.project_out(list(self.ortho_vectors(site,nsites)),
+      tol=self.settings['ortho_tol'],tol_absolute=True)
+    self.logger.debug('Effective Hamiltonian projected down')
+    # Prepare initial guess
+    # TODO regauge after update? 
+    if gauge is not None and gauge[0] == 'l':
+      M0 = self.psi.getTc(site).mat_mult('r-l',gauge[1])
+      M0 = M0.diag_mult('l',self.psi.getschmidt(site-1))
+    else:
+      M0 = self.psi.getTL(site)
+    if not (nsites==1 and site+1==self.N):
+      if nsites==1 and gauge is not None and gauge[0] == 'r':
+        M0 = M0.mat_mult('l-r',gauge[1])
+      M0 = M0.diag_mult('r',self.psi.getschmidt(site))
+    if nsites == 2:
+      M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
+    w,v = Heff.eigs(self.settings['keig'],which='SA',guess=M0, tol=self.eigtol)
+    self.logger.log(16,'Effective energy computed as %0.10f',min(w))
+    return v[np.argmin(w)]
+    
   def doubleupdateleft(self):
     # TODO better way of handling transfer
-    tR = self.gettransfR(3).left()
-    #tR.discard = True
+    tR = self.gettransfR(2)
     self.logger.log(12, 'left edge double update')
-    self.H.DMRG_opt_double_left(self.psi, self.chi, tR, self.settings['tol2'])
-    tR.discard()
-    #self.gettransfL(0)
+    Heff = operators.NetworkOperator('(T);Ol;Or;R;R.t-T.r,Ol.r-Or.l,'
+      'Or.r-R.c,Ol.t-T.bl,Or.t-T.br;R.b>r,Ol.b>bl,Or.b>br',
+      self.H.getT(0),self.H.getT(1),tR.T)
+    M = self.optimize_tensor(Heff, 0, 2)
+    self.logger.debug('Dividing tensors')
+    ML,s,MR = M.svd('bl|r,l|br,r',chi=self.chi,tolerance=self.settings['tol2'])
+    self.psi.setTL(ML.renamed('bl-b'),0,unitary=True)
+    self.psi.setTR(MR.renamed('br-b'),1,unitary=True)
+    self.psi.setschmidt(s/np.linalg.norm(s),0)
+    self.discardright()
 
   def doubleupdateright(self):
     # TODO better way of handling transfer
-    tL = self.gettransfL(self.N-4).right()
-    #tL.discard = True
+    tL = self.gettransfL(self.N-3)
     self.logger.log(12, 'right edge double update')
-    self.H.DMRG_opt_double_right(self.psi, self.chi, tL, self.settings['tol2'])
-    tL.discard()
-    #self.gettransfR(self.N-1)
+    Heff = operators.NetworkOperator('L;(T);Ol;Or;L.t-T.l,L.c-Ol.l,'
+      'Ol.r-Or.l,Ol.t-T.bl,Or.t-T.br;L.b>l,Ol.b>bl,Or.b>br',
+      tL.T,self.H.getT(self.N-2),self.H.getT(self.N-1))
+    M = self.optimize_tensor(Heff, self.N-2, 2)
+    self.logger.debug('Dividing tensors')
+    ML,s,MR = M.svd('l,bl|r,l|br',chi=self.chi,tolerance=self.settings['tol2'])
+    self.psi.setTL(ML.renamed('bl-b'),self.N-2,unitary=True)
+    self.psi.setTR(MR.renamed('br-b'),self.N-1,unitary=True)
+    self.psi.setschmidt(s/np.linalg.norm(s), self.N-2)
+    self.discardleft()
 
   def doubleupdate(self, n, direction):
     self.logger.log(15, 'site %s double update (%s)', n, direction)
@@ -1368,29 +1768,53 @@ class DMRGOrthoManager(DMRGManager):
         self.discardleft()
     tR = self.gettransfR(n+2)
     tL = self.gettransfL(n-1)
-    self.H.DMRG_opt_double(self.psi, n, self.chi,
-        tL,tR,None,direction=='r', self.settings['tol2'], self.eigtol)
+    Heff = operators.NetworkOperator('L;(T);Ol;Or;R;L.t-T.l,R.t-T.r,'
+      'L.c-Ol.l,Ol.r-Or.l,Or.r-R.c,Ol.t-T.bl,Or.t-T.br;'
+      'L.b>l,R.b>r,Ol.b>bl,Or.b>br', tL.T,self.H.getT(n),self.H.getT(n+1),tR.T)
+    if self.psi.charged_at(n) or self.psi.charged_at(n+1):
+      Heff.charge(self.psi.irrep)
+    M = self.optimize_tensor(Heff, n, 2)
+    self.logger.debug('Dividing tensor')
+    if self.psi.charged_at(n+1):
+      MR,s,ML = M.svd('r,br|l,r|bl,l',chi=self.chi,
+        tolerance=self.settings['tol2'])
+    else:
+      ML,s,MR = M.svd('l,bl|r,l|br,r',chi=self.chi,
+        tolerance=self.settings['tol2'])
+    self.psi.setTL(ML.renamed('bl-b'),n,unitary=True)
+    self.psi.setTR(MR.renamed('br-b'),n+1,unitary=True)
+    self.psi.setschmidt(s/np.linalg.norm(s), n)
     if direction == 'r':
       self.discardright()
     else:
       self.discardleft()
 
   def singleupdateleft(self):
-    tR = self.gettransfR(2).left()
-    #tR.discard = True
+    tR = self.gettransfR(1)
     self.logger.log(10, 'left edge single update')
-    mat = self.H.DMRG_opt_single_left(self.psi, tR, self.settings['tol1'])
-    tR.discard()
-    return mat.diag_mult('l', self.psi.getschmidt(0))
+    Heff = operators.NetworkOperator('(T);O;R;R.t-T.r,O.r-R.c,O.t-T.b;'
+      'R.b>r,O.b>b', self.H.getT(0), tR.T)
+    M = self.optimize_tensor(Heff, 0, 1)
+    ML,s,MR = M.svd('b|r,l|r')
+    self.psi.setTL(ML,0,unitary=True)
+    schmidt = s/np.linalg.norm(s)
+    self.psi.setschmidt(schmidt,0)
+    self.discardright()
+    #return MR.diag_mult('l', schmidt)
+    return MR
 
   def singleupdateright(self, gauge):
-    tL = self.gettransfL(self.N-3).right()
-    #tL.discard = True
+    tL = self.gettransfL(self.N-2)
     self.logger.log(10, 'right edge single update')
-    mat = self.H.DMRG_opt_single_right(self.psi, tL, self.settings['tol2'])
-    tL.discard()
-    #self.transfRs = [self.H.getboundarytransfright(self.psi)]
-    return mat
+    Heff = operators.NetworkOperator('(T);O;L;L.t-T.l,O.l-L.c,O.t-T.b;'
+      'L.b>l,O.b>b', self.H.getT(self.N-1), tL.T)
+    M = self.optimize_tensor(Heff, self.N-1,1)
+    ML,s,MR = M.svd('l|r,l|b')
+    self.psi.setTR(MR,self.N-1,unitary=True)
+    schmidt = s/np.linalg.norm(s)
+    self.psi.setschmidt(schmidt,self.N-2)
+    self.discardleft()
+    return ML
 
   def singleupdate(self, n, direction, gauge):
     self.logger.log(12, 'site %s single update (%s)', n, direction)
@@ -1403,99 +1827,117 @@ class DMRGOrthoManager(DMRGManager):
         self.discardleft()
     tR = self.gettransfR(n+1)
     tL = self.gettransfL(n-1)
-    gL,gR = (gauge, None) if right else (None, gauge)
-    mat = self.H.DMRG_opt_single(self.psi, n, tL, tR,
-        right, gL, gR, self.settings['tol1'], self.eigtol)
+    Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'
+      'L.c-O.l,O.r-R.c,O.t-T.b;L.b>l,R.b>r,O.b>b', tL.T,self.H.getT(n),tR.T)
+    if self.psi.charged_at(n):
+      Heff.charge(self.psi.irrep)
+    M = self.optimize_tensor(Heff, n, 1, (direction, gauge))
     if right:
-      mat = mat.diag_mult('l',self.psi.getschmidt(n))
-    if right:
+      ML,s,MR = M.svd('l,b|r,l|r',tolerance=self.settings['tol1'])
+      self.psi.setTL(ML,n,unitary=True)
+      self.psi.setschmidt(s/np.linalg.norm(s),n)
       self.discardright()
+      return MR
     else:
+      MR,s,ML = M.svd('r,b|l,r|l',tolerance=self.settings['tol1'])
+      self.psi.setTR(MR,n,unitary=True)
+      self.psi.setschmidt(s/np.linalg.norm(s),n-1)
       self.discardleft()
-    #  self.transfRs.pop(0)
-    #  self.transfLs.append(self.transfLs[-1].right())
-    #else:
-    #  self.transfLs.pop()
-    #  self.transfRs.insert(0, self.transfRs[0].left())
-    return mat
+      return ML
 
-  def gauge_at(self, site, gauge, direction='r'):
-    self.logger.log(10, 'gauging tensor at site %s', site)
-    if direction == 'r':
-      self.psi.rgauge(gauge,site)
-    else:
-      self.psi.lgauge(gauge,site)
+  def returnvalue(self):
+    return list(self.psilist)
 
-  def run(self):
-    if self.supstatus == 'complete':
-      print('Optimization already completed')
-      return self.psi,self.E
-    if not self.supervisors:
-      # Initialize base
-      self.logger.log(10, 'Initializing base supervisor')
-      self.supervisors.append(self.supfunctions['base'](self.chis, self.N, self.settings))
-      self.suplabels.append('base')
-      self.supstatus.append(None)
-    elif self.supervisors == 'paused':
-      self.logger.log(10, 'Resuming base supervisor')
-      self.logger.log(5, 'Using state %s', self.supstatus[0])
-      config.streamlog.log(30, 'Resuming: chi = % 3d (#%s)', self.chi, self.chiindex)
-      # Initialize saved supervisors
-      sup = self.supfunctions['base'](self.chis, self.N, self.settings, state=self.supstatus[0])
-      self.supervisors = [sup]
-      level = 0
-      while len(self.supervisors) < len(self.supstatus):
-        cmd,(label,*args),status = next(sup)
-        assert cmd == 'runsub' and label == self.suplabels[level+1]
-        if self.supstatus[level] != status:
-          self.logger.log(25, 'Supervisor %s status %s superceded as %s',
-            label, self.supstatus[level], status)
-          self.supstatus[level] = status
-        level += 1
-        self.logger.log(10, 'Resuming level-%s supervisor %s',level+1,label)
-        self.logger.log(5, 'Using arguments %s', args)
-        sup = self.supfunctions[label](*args, self.settings, state=self.supstatus[level])
-        self.supervisors.append(sup)
-    level = len(self.supervisors)
-    sendval = None
-    while level > 0:
-      # Next step from current subroutine
-      cmd,args,*status = self.supervisors[-1].send(sendval)
-      self.logger.log(8, 'Received %s command from supervisor %s',
-        cmd, self.suplabels[-1])
-      sendval = None # Default to not sending anything
-      if status:
-        # Candidate save checkpoint--includes supervisor status
-        self.logger.log(8, 'Setting status to %s', status)
-        self.supstatus[-1], = status
-        if self.filename:
-          savequit = self.savecheckpoint(level)
-          if savequit:
-            import sys
-            sys.exit()
-      # Options for cmd
-      if cmd == 'complete':
-        # Subroutine completed execution
-        self.supervisors.pop()
-        self.supstatus.pop()
-        label = self.suplabels.pop()
-        level -= 1
-        if args:
-          # Pass arguments up the chain
-          sendval = args
-        self.logger.log(10, 'Supervisor %s complete',label)
-      elif cmd == 'runsub':
-        # New sub-supervisor 
-        label,*supargs = args
-        subsup = self.supfunctions[label](*supargs, self.settings)
-        self.supervisors.append(subsup)
-        self.supstatus.append(None)
-        self.suplabels.append(label)
-        level += 1
-        self.logger.log(10, 'Starting level-%s supervisor %s',level,label)
-      else:
-        # Algorithm-specific options
-        sendval = self.supcommands[cmd](*args)
-    self.supstatus = 'complete'
-    self.save()
-    return self.psi, self.E
+def doubleOrthoSupervisor(N, settings, state=None):
+  if state is None:
+    psi0 = 0 # Starting index of state
+    niter = 0 # Iterations (after adding new state)
+    yield 'righttransf', (2,)
+    yield 'saveschmidt', ()
+    npsi,newpsi = yield 'addstatecond', (0, None)
+  else:
+    niter,psi0,npsi = state
+    if psi0 == 'bakein':
+      psi0 = npsi-1
+      #yield 'select',(npsi-1) # Should already be selected
+      for n in range(niter,settings['bakein']):
+        yield 'runsub', ('doublesweep',N), (n,'bakein',npsi)
+        yield 'compare2', (n,npsi-1)
+      niter = 0
+    newpsi = False
+  while newpsi or (niter < settings['nsweep2']):
+    if newpsi:
+      yield 'newstate', ()
+      npsi += 1
+      yield 'righttransf', (2,)
+      yield 'saveschmidt', ()
+      for n in range(settings['bakein']):
+        yield 'runsub', ('doublesweep',N), (n,'bakein',npsi)
+        yield 'compare2', (n,npsi-1)
+      niter = 0
+      psi0 = 0
+    for ipsi in range(psi0,npsi):
+      E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsi)
+      if ipsi+1 != npsi:
+        yield 'select', (ipsi,(-1,2))
+    psi0 = 0
+    if niter % settings['ncanon2'] == 0:
+      yield 'clearall', ()
+      for ipsi in range(npsi):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      for ipsi in range(npsi):
+        yield 'select',(ipsi,None)
+        yield 'righttransf', (2,) #TODO use gauge?
+    diff = yield 'compare2', (niter,)
+    yield 'select',(0,(-1,2))
+    npsi,newpsi = yield 'addstatecond', (niter, diff)
+    if not newpsi and diff < settings['schmidtdelta']:
+      if niter % settings['ncanon2'] != 0:
+        yield 'canonical', (True,)
+      break
+    niter += 1
+  if niter == settings['nsweep2']:
+    niter -= 1
+  if niter % settings['ncanon2'] != 0:
+    yield 'clearall', ()
+    for ipsi in range(npsi):
+      yield 'select', (ipsi,None)
+      yield 'canonical',(True,)
+  yield 'complete', ()
+  
+def singleOrthoSupervisor(N, settings, state=None):
+  if state is None:
+    psi0 = 0
+    i0 = 0
+    yield 'righttransf', (1,)
+    yield 'saveschmidt', ()
+    npsi = yield 'select', (psi0,(-1,1))
+  else:
+    i0,psi0,npsi = state
+    yield 'runsub',('singlesweep',N),state
+    psi0 += 1
+  for niter in range(i0, settings['nsweep1']):
+    for ipsi in range(psi0,npsi):
+      yield 'select', (ipsi,(-1,1))
+      E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsi)
+    psi0 = 0
+    diff = yield 'compare2', (niter,)
+    if diff < settings['schmidtdelta1']:
+      break
+    if niter % settings['ncanon1'] == 0:
+      yield 'clearall', ()
+      for ipsi in range(npsi):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      for ipsi in range(npsi):
+        yield 'select',(ipsi,None)
+        yield 'righttransf', (1,) #TODO use gauge?
+      yield 'select', (0,None)
+  if niter % settings['ncanon1'] != 0:
+    yield 'clearall', ()
+    for ipsi in range(npsi):
+      yield 'select',(ipsi,None)
+      yield 'canonical', (True,)
+  yield 'complete', ()
+  

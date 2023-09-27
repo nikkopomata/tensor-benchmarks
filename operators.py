@@ -231,7 +231,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       if apply_out:
         self._fuse_out = ProjectionFusion(self._fuse_out, projector)
 
-  def project_out(self, vectors, apply_in=True, apply_out=True, tol=1e-14):
+  def project_out(self, vectors, apply_in=True, apply_out=True, tol=1e-14, tol_absolute=False):
     """Project out vectors (provided as a list of rank-n tensors or single
     rank-n+1 tensor, for n rank of input space--must use same index names)
     by calculating projector onto orthogonal completement & applying as in
@@ -253,13 +253,17 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       dextra = vectors.shape[iextra]
       T = vectors.permuted((iextra,)+tuple(fuse._idxs))
       vectors = [vectors.init_fromT(T[n], ','.join(f'{idx}|0.{idx}' for idx in fuse._idxs)) for n in range(dextra)]
-    mat = np.array([fuse.vector_convert(v) for v in vectors])
+    mat = np.array([fuse.vector_convert(v,check=True) for v in vectors])
+    config.linalg_log.debug('Projecting out %d vectors in dimension-%d space',*mat.shape)
     L,s,R = linalg.svd(mat,full_matrices=True)
     if not tol:
       bi = s==0
     else:
       maxval = max(abs(v) for v in vectors)
-      cutoff = maxval*tol
+      if tol_absolute:
+        cutoff = tol
+      else:
+        cutoff = maxval*tol
       bi = s < cutoff
     bi = np.concatenate([bi, np.ones(R.shape[0]-len(s),dtype=bool)])
     w = R[bi,:].conj()
@@ -466,8 +470,9 @@ class NetworkOperator(TensorOperator):
         targs.insert(tidx, T0)
         self.network = networks.Network.network(net, *targs)
       else:
-        t = args[-1]
-        self.network = networks.Network.network(net,*args[:-1])
+        # TODO was it being used the other way around anywhere?
+        t = args[0]
+        self.network = networks.Network.network(net,*args[1:])
         T0 = self.network[t]
         self._fuse_in = T0.getFusion(T0._idxs)
       if order is not None:
@@ -851,8 +856,8 @@ class ProjectionFusion(FusionPrimitive):
   def dim(self):
     return self.__base.dim
 
-  def vector_convert(self, T, idx=None):
-    return self.isometry.dot(self.__base.vector_convert(T,idx=idx))
+  def vector_convert(self, T, idx=None, check=False):
+    return self.isometry.dot(self.__base.vector_convert(T,idx=idx,check=check))
 
   def tensor_convert(self, v, idx=None):
     vx = self.isometry.T.conj().dot(v)
