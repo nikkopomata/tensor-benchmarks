@@ -191,9 +191,9 @@ class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
       self._dimeff = self._out.degen_of(self.__class__.group.triv)
     return self._dimeff
 
-  def vector_convert(self, T, idx=None):
+  def vector_convert(self, T, idx=None, check=False):
     # Select invariant subspace
-    v = super().vector_convert(T,idx)
+    v = super().vector_convert(T,idx,check)
     return v[self.vector_slice]
 
   @property

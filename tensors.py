@@ -1853,9 +1853,17 @@ class FusionPrimitive:
   def shape(self):
     return tuple(v.dim for v in self._spaces_in)
 
-  def vector_convert(self, T, idx=None):
+  def vector_convert(self, T, idx=None, check=False):
     if idx is None:
       idx = self._idxs
+    if check:
+      if T.rank != self.rank:
+        raise ValueError('Rank of converted tensor does not match')
+      for ii,ll in enumerate(idx):
+        if ll not in T._idxs:
+          raise KeyError('Converted Tensor missing expected index %s'%ll)
+        if not (T.getspace(ll) == self._spaces_in[ii]):
+          raise ValueError('Index %s of tensor does not match %s of fusion'%(ll,self._idxs[ii]))
     V,info = T._do_fuse((0,idx),prims={0:self})
     return V._T
 
