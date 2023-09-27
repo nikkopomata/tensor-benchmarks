@@ -845,7 +845,9 @@ class DMRGManager:
     mat = self.H.DMRG_opt_single(self.psi, n, tL, tR,
         right, gL, gR, self.settings['tol1'], self.eigtol)
     if right:
-      mat = mat.diag_mult('l',self.psi.getschmidt(n))
+      #TODO is this the right way to do it?
+      #mat = mat.diag_mult('l',self.psi.getschmidt(n))
+      pass
     if right:
       self.discardright()
     else:
