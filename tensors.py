@@ -295,7 +295,10 @@ class Tensor:
         vs.append(~V)
       else:
         vs.append(V)
-    return cls(T, idxs, tuple(vs))
+    if 'args' in settings:
+      return cls(T, idxs, tuple(vs), *settings['args'])
+    else:
+      return cls(T, idxs, tuple(vs))
 
   def init_fromT(self, T, parsestr, *tensors, **settings):
     """init_from, but 'self' is first tensor argument"""

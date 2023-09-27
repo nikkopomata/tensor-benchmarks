@@ -19,6 +19,8 @@ memratio = 10
 flush = True
 # Number of times to try linalg.svd before resorting to eigenvalue methods
 svd_retry = 1
+# 'Load-only mode' (don't change/fix anything found incomplete during unpickling
+loadonly = False
 
 def restrict_memory(newmemcap):
   import resource
