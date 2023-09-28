@@ -1162,7 +1162,8 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
 class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
   def __init__(self, Hamiltonian, chis, npsis, ortho_tol=1e-7, keig=1,
-      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,**kw_args):
+      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,persiteshift=0,
+      **kw_args):
     self.psiindex = 0
     self.npsi_tot = npsis
     self.npsis = 1
@@ -1175,6 +1176,7 @@ class DMRGOrthoManager(DMRGManager):
     self.s0s = [None]
     self.E0s = [None]
     super().__init__(Hamiltonian, chis, **kw_args)
+    self.Eshift = self.N*persiteshift
     self.__version = '0'
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein)
@@ -1707,11 +1709,13 @@ class DMRGOrthoManager(DMRGManager):
         T = T.contract(R.T,'r-t;~;b>r*')
       yield T.conj()
       
-  def optimize_tensor(self, Heff, site, nsites, gauge=None):
+  def optimize_tensor(self, Heff, site, nsites, gauge=None, charge=None):
     # Project out vectors
     self.logger.info('Optimizing site %d, %d-site update',site,nsites)
-    Heff.project_out(list(self.ortho_vectors(site,nsites)),
-      tol=self.settings['ortho_tol'],tol_absolute=True)
+    Hshift = Heff-self.Eshift
+    # Project shifted operator away from effective complementary vectors
+    Hshift.project_out(list(self.ortho_vectors(site,nsites)),
+      tol=self.settings['ortho_tol'],tol_absolute=True,zero=True)
     self.logger.debug('Effective Hamiltonian projected down')
     # Prepare initial guess
     # TODO regauge after update? 
@@ -1727,7 +1731,7 @@ class DMRGOrthoManager(DMRGManager):
     if nsites == 2:
       M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
     w,v = Heff.eigs(self.settings['keig'],which='SA',guess=M0, tol=self.eigtol)
-    self.logger.log(16,'Effective energy computed as %0.10f',min(w))
+    self.logger.log(16,'Effective energy computed as %0.10f',min(w)+self.Eshift)
     return v[np.argmin(w)]
     
   def doubleupdateleft(self):
@@ -1774,7 +1778,9 @@ class DMRGOrthoManager(DMRGManager):
       'L.c-Ol.l,Ol.r-Or.l,Or.r-R.c,Ol.t-T.bl,Or.t-T.br;'
       'L.b>l,R.b>r,Ol.b>bl,Or.b>br', tL.T,self.H.getT(n),self.H.getT(n+1),tR.T)
     if self.psi.charged_at(n) or self.psi.charged_at(n+1):
-      Heff.charge(self.psi.irrep)
+      ch = self.psi.irrep
+    else:
+      ch = None
     M = self.optimize_tensor(Heff, n, 2)
     self.logger.debug('Dividing tensor')
     if self.psi.charged_at(n+1):
@@ -1832,7 +1838,9 @@ class DMRGOrthoManager(DMRGManager):
     Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'
       'L.c-O.l,O.r-R.c,O.t-T.b;L.b>l,R.b>r,O.b>b', tL.T,self.H.getT(n),tR.T)
     if self.psi.charged_at(n):
-      Heff.charge(self.psi.irrep)
+      ch = self.psi.irrep
+    else:
+      ch = None
     M = self.optimize_tensor(Heff, n, 1, (direction, gauge))
     if right:
       ML,s,MR = M.svd('l,b|r,l|r',tolerance=self.settings['tol1'])
