@@ -1730,7 +1730,7 @@ class DMRGOrthoManager(DMRGManager):
       M0 = M0.diag_mult('r',self.psi.getschmidt(site))
     if nsites == 2:
       M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
-    w,v = Heff.eigs(self.settings['keig'],which='SA',guess=M0, tol=self.eigtol)
+    w,v = Heff.eigs(self.settings['keig'],which='LM',guess=M0, tol=self.eigtol)
     self.logger.log(16,'Effective energy computed as %0.10f',min(w)+self.Eshift)
     return v[np.argmin(w)]
     
