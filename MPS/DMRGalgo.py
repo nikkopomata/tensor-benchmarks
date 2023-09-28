@@ -1055,7 +1055,7 @@ class PseudoShelf(MutableMapping):
   def __len__(self):
     return len(os.listdir(self.path))
 
-  def __contains__(self):
+  def __contains__(self, key):
     return os.path.isfile(self.fname(key))
 
   def clear(self):

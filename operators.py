@@ -216,22 +216,25 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
   def H(self):
     return self.adjoint()
 
-  def project(self, projector, apply_in=True, apply_out=True):
+  def project(self, projector, apply_in=True, apply_out=True, zero=False):
     """Apply projector to input and/or output indices
-    Pass 'projector' as isometric matrix acting on effective index"""
+    Pass 'projector' as isometric matrix acting on effective index
+    If zero, use ZeroingFusion instead of ProjectionFusion
+      (assume provided as complement instead of original)"""
     #TODO alternative inputs
     #TODO processing through fusion ensures disagreement when directly called
     # with tensor_action 
+    projcls = ZeroingFusion if zero else ProjectionFusion
     if apply_in and apply_out and self.is_endomorphic:
-      self._fuse_in = ProjectionFusion(self._fuse_in, projector)
+      self._fuse_in = projcls(self._fuse_in, projector)
       self._fuse_out = self._fuse_in
     else:
       if apply_in:
-        self._fuse_in = ProjectionFusion(self._fuse_in, projector)
+        self._fuse_in = projcls(self._fuse_in, projector)
       if apply_out:
-        self._fuse_out = ProjectionFusion(self._fuse_out, projector)
+        self._fuse_out = projcls(self._fuse_out, projector)
 
-  def project_out(self, vectors, apply_in=True, apply_out=True, tol=1e-14, tol_absolute=False):
+  def project_out(self, vectors, apply_in=True, apply_out=True, tol=1e-14, tol_absolute=False, zero=False):
     """Project out vectors (provided as a list of rank-n tensors or single
     rank-n+1 tensor, for n rank of input space--must use same index names)
     by calculating projector onto orthogonal completement & applying as in
@@ -255,7 +258,10 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       vectors = [vectors.init_fromT(T[n], ','.join(f'{idx}|0.{idx}' for idx in fuse._idxs)) for n in range(dextra)]
     mat = np.array([fuse.vector_convert(v,check=True) for v in vectors])
     config.linalg_log.debug('Projecting out %d vectors in dimension-%d space',*mat.shape)
-    L,s,R = linalg.svd(mat,full_matrices=True)
+    if zero:
+      L,s,R = linalg.svd(mat,full_matrices=False)
+    else:
+      L,s,R = linalg.svd(mat,full_matrices=True)
     if not tol:
       bi = s==0
     else:
@@ -265,9 +271,13 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       else:
         cutoff = maxval*tol
       bi = s < cutoff
-    bi = np.concatenate([bi, np.ones(R.shape[0]-len(s),dtype=bool)])
+    if zero:
+      # Interested in basis for vectors provided - opposite of alternative
+      bi = not bi
+    else:
+      bi = np.concatenate([bi, np.ones(R.shape[0]-len(s),dtype=bool)])
     w = R[bi,:].conj()
-    self.project(w, apply_in=apply_in,apply_out=apply_out)
+    self.project(w, apply_in=apply_in,apply_out=apply_out,zero=zero)
 
   def eigs(self, k, herm=True, vecs=True, nv=None, guess=None, mat=False,
       **eigs_kw):
@@ -823,7 +833,7 @@ class ProjectionFusion(FusionPrimitive):
   effective space of fusion to subspace"""
   def __init__(self, base, w):
     assert isinstance(base,FusionPrimitive)
-    if isinstance(base, ProjectionFusion):
+    if isinstance(base, ProjectionFusion) and not isinstance(base,ProjectedShiftFusion):
       # Compose projectors
       w = w.dot(base.isometry)
       base = base.__base
@@ -873,3 +883,53 @@ class ProjectionFusion(FusionPrimitive):
   @property
   def effective_dim(self):
     return self.isometry.shape[0]
+
+
+class ZeroingFusion(ProjectionFusion):
+  """Instead of projecting out in the sense of O -> W O W^H,
+  use O -> (1 - P) O (1 - P)
+  where 1 - P = W^H W and P is given in the form V^H V
+  """
+  def __init__(self, base, isometry_complement):
+    assert isinstance(base,FusionPrimitive)
+    assert isinstance(isometry_complement,np.ndarray) or isinstance(isometry_complement,sparse.linalg.LinearOperator)
+    self.__base = base
+    # TODO compose -- requires SVD tolerance?
+    self.iso_comp = isometry_complement
+    self.iso_comp_H = isometry_complement.T.conj()
+    assert isometry_complement.shape[1] == base.effective_dim
+    self._rank = self.__base._rank
+
+  def conj(self):
+    return self.__class__(self.__base.conj(), self.iso_comp.conj())
+
+  @property
+  def _idxs(self):
+    return self.__base._idxs
+
+  @property
+  def _out(self):
+    return self.__base._out
+
+  @property
+  def dim(self):
+    return self.__base.dim
+
+  def vector_convert(self, T, idx=None, check=False):
+    v0 = self.__base.vector_convert(T,idx=idx,check=check)
+    return v0 - self.iso_comp_H.dot(self.iso_comp.dot(v0))
+
+  def tensor_convert(self, v, idx=None):
+    vx = v - self.iso_comp_H.dot(self.iso_comp.dot(v))
+    return self.__base.tensor_convert(vx,idx=idx)
+
+  def tensor_convert_multiaxis(self, T, idx_newax, ax_old=0, **kw_args):
+    # TODO check operationality
+    T1 = T.moveaxis(ax_old,0)
+    T1 = T1 - self.iso_comp_H.dot(self.iso_comp.dot(T1))
+    T1 = T1.moveaxis(0,ax_old)
+    return self.__base.tensor_convert_multiaxis(T1,idx_newax,ax_old=ax_old,**kw_args)
+
+  @property
+  def effective_dim(self):
+    return self.__base.effective_dim
