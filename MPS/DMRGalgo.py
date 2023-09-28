@@ -1150,6 +1150,7 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
       if override:
         # Additionally reset general settings
         dmrg_kw.pop('psi0',None)
+        dmrg_kw.pop('persiteshift',None)
         Mngr.resetsettings(dmrg_kw)
         if use_shelf:
           Mngr.setdbon()
@@ -1176,10 +1177,13 @@ class DMRGOrthoManager(DMRGManager):
     self.s0s = [None]
     self.E0s = [None]
     super().__init__(Hamiltonian, chis, **kw_args)
+    if persiteshift <= 0:
+      raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
     self.__version = '0'
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
-      newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein)
+      newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
+      useguess=True)
 
   @property
   def psi(self):
@@ -1470,7 +1474,9 @@ class DMRGOrthoManager(DMRGManager):
     self.selectpsi(self.npsis-1,(site-1,site+2))
     #self.getrighttransfers(site+2)
     #self.getlefttransfers(site-1)
+    ug,self.settings['useguess'] = self.settings['useguess'],False
     self.doubleupdate(site,'r')
+    self.settings['useguess'] = True
     self.logger.info('Completing by imposing canonical form')
     self.restorecanonical()
     self.getrighttransfers(2)
@@ -1713,24 +1719,29 @@ class DMRGOrthoManager(DMRGManager):
     # Project out vectors
     self.logger.info('Optimizing site %d, %d-site update',site,nsites)
     Hshift = Heff-self.Eshift
+    if charge is not None:
+      Hshift.charge(charge)
     # Project shifted operator away from effective complementary vectors
     Hshift.project_out(list(self.ortho_vectors(site,nsites)),
       tol=self.settings['ortho_tol'],tol_absolute=True,zero=True)
     self.logger.debug('Effective Hamiltonian projected down')
     # Prepare initial guess
     # TODO regauge after update? 
-    if gauge is not None and gauge[0] == 'l':
-      M0 = self.psi.getTc(site).mat_mult('r-l',gauge[1])
-      M0 = M0.diag_mult('l',self.psi.getschmidt(site-1))
+    if self.settings['useguess']:
+      if gauge is not None and gauge[0] == 'l':
+        M0 = self.psi.getTc(site).mat_mult('r-l',gauge[1])
+        M0 = M0.diag_mult('l',self.psi.getschmidt(site-1))
+      else:
+        M0 = self.psi.getTL(site)
+      if not (nsites==1 and site+1==self.N):
+        if nsites==1 and gauge is not None and gauge[0] == 'r':
+          M0 = M0.mat_mult('l-r',gauge[1])
+        M0 = M0.diag_mult('r',self.psi.getschmidt(site))
+      if nsites == 2:
+        M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
     else:
-      M0 = self.psi.getTL(site)
-    if not (nsites==1 and site+1==self.N):
-      if nsites==1 and gauge is not None and gauge[0] == 'r':
-        M0 = M0.mat_mult('l-r',gauge[1])
-      M0 = M0.diag_mult('r',self.psi.getschmidt(site))
-    if nsites == 2:
-      M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
-    w,v = Heff.eigs(self.settings['keig'],which='LM',guess=M0, tol=self.eigtol)
+      M0 = None
+    w,v = Hshift.eigs(self.settings['keig'],which='LM',guess=M0, tol=self.eigtol)
     self.logger.log(16,'Effective energy computed as %0.10f',min(w)+self.Eshift)
     return v[np.argmin(w)]
     
@@ -1781,7 +1792,7 @@ class DMRGOrthoManager(DMRGManager):
       ch = self.psi.irrep
     else:
       ch = None
-    M = self.optimize_tensor(Heff, n, 2)
+    M = self.optimize_tensor(Heff, n, 2, charge=ch)
     self.logger.debug('Dividing tensor')
     if self.psi.charged_at(n+1):
       MR,s,ML = M.svd('r,br|l,r|bl,l',chi=self.chi,
@@ -1841,7 +1852,7 @@ class DMRGOrthoManager(DMRGManager):
       ch = self.psi.irrep
     else:
       ch = None
-    M = self.optimize_tensor(Heff, n, 1, (direction, gauge))
+    M = self.optimize_tensor(Heff, n, 1, (direction, gauge), charge=ch)
     if right:
       ML,s,MR = M.svd('l,b|r,l|r',tolerance=self.settings['tol1'])
       self.psi.setTL(ML,n,unitary=True)

@@ -244,7 +244,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
     will be the minimum amplitude"""
     if apply_in and apply_out and not self.is_endomorphic:
       # Apply separately
-      self.project_out(vectors, apply_in=False, apply_out=True, tol=tol)
+      self.project_out(vectors, apply_in=False, apply_out=True, tol=tol, zero=zero)
       apply_out = False
     assert apply_in or apply_out
     fuse = self._fuse_in if apply_in else self._fuse_out
@@ -273,7 +273,7 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
       bi = s < cutoff
     if zero:
       # Interested in basis for vectors provided - opposite of alternative
-      bi = not bi
+      bi = ~bi
     else:
       bi = np.concatenate([bi, np.ones(R.shape[0]-len(s),dtype=bool)])
     w = R[bi,:].conj()
@@ -317,12 +317,30 @@ class TensorOperator(sparse.linalg.LinearOperator, ABC):
         raise TypeError('guess, if provided, must be Tensor')
       self.iters = 0
       if herm:
-        rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
-          v0=guess,**eigs_kw)
+        try:
+          rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
+            v0=guess,**eigs_kw)
+        except sparse.linalg.ArpackError as e:
+          if 'Starting vector is zero' in str(e):
+            config.linalg_log.error('Guess vector determined as zero '
+              '(norm %0.4g); retrying without',linalg.norm(guess))
+            rv = sparse.linalg.eigsh(self, k, ncv=nv, return_eigenvectors=vecs,
+              **eigs_kw)
+          else:
+            raise
         config.linalg_log.log(13,'Lanczos diagonalization complete')
       else:
-        rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
-          v0=guess,**eigs_kw)
+        try:
+          rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
+            v0=guess,**eigs_kw)
+        except sparse.linalg.ArpackError as e:
+          if 'Starting vector is zero' in str(e):
+            config.linalg_log.error('Guess vector determined as zero '
+              '(norm %0.4g); retrying without',linalg.norm(guess))
+            rv = sparse.linalg.eigs(self, k, ncv=nv, return_eigenvectors=vecs,
+              **eigs_kw)
+          else:
+            raise
         config.linalg_log.log(13,'Arnoldi diagonalization complete')
       if 'tol' in eigs_kw and eigs_kw['tol'] and k>1:
         # Check difference in eigenvalues is outside tolerance
@@ -833,7 +851,7 @@ class ProjectionFusion(FusionPrimitive):
   effective space of fusion to subspace"""
   def __init__(self, base, w):
     assert isinstance(base,FusionPrimitive)
-    if isinstance(base, ProjectionFusion) and not isinstance(base,ProjectedShiftFusion):
+    if isinstance(base, ProjectionFusion) and not isinstance(base,ZeroingFusion):
       # Compose projectors
       w = w.dot(base.isometry)
       base = base.__base
@@ -894,6 +912,7 @@ class ZeroingFusion(ProjectionFusion):
     assert isinstance(base,FusionPrimitive)
     assert isinstance(isometry_complement,np.ndarray) or isinstance(isometry_complement,sparse.linalg.LinearOperator)
     self.__base = base
+    self._ProjectionFusion__base = base
     # TODO compose -- requires SVD tolerance?
     self.iso_comp = isometry_complement
     self.iso_comp_H = isometry_complement.T.conj()
@@ -902,18 +921,6 @@ class ZeroingFusion(ProjectionFusion):
 
   def conj(self):
     return self.__class__(self.__base.conj(), self.iso_comp.conj())
-
-  @property
-  def _idxs(self):
-    return self.__base._idxs
-
-  @property
-  def _out(self):
-    return self.__base._out
-
-  @property
-  def dim(self):
-    return self.__base.dim
 
   def vector_convert(self, T, idx=None, check=False):
     v0 = self.__base.vector_convert(T,idx=idx,check=check)
