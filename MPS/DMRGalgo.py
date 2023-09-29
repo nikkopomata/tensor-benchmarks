@@ -378,7 +378,7 @@ class DMRGManager:
     """Use function passed instead of standard"""
     self.supfunctions[name] = func
 
-  def getE(self):
+  def getE(self, savelast=True, updaterel=True):
     if self.ntransfR == 0:
       assert not self.E
       self.E = np.real(self.H.expv(self.psi))
@@ -386,9 +386,11 @@ class DMRGManager:
       return self.E
     tR0 = self.gettransfR(self.N-self.ntransfR)
     transf = tR0.moveby(self.N-self.ntransfR-1,unstrict=True)
-    self.E0,self.E = self.E,np.real(transf.left(terminal=True))
+    if savelast:
+      self.E0 = self.E
+    self.E = np.real(transf.left(terminal=True))
     self.logger.log(20,'Energy calculated as %s',self.E) 
-    if self.E0 is not None and self.settings['eigtol_rel']:
+    if self.E0 is not None and self.settings['eigtol_rel'] and updaterel:
       dE = abs(self.E - self.E0)
       self.eigtol = self.settings['eigtol_rel']*dE
       self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
@@ -860,7 +862,11 @@ class DMRGManager:
       self.supervisors = [sup]
       level = 0
       while len(self.supervisors) < len(self.supstatus):
-        cmd,(label,*args),status = next(sup)
+        cmd,*argall = next(sup)
+        while cmd == 'announce':
+          config.streamlog.log(30, argall[0])
+          cmd,*argall = next(sup)
+        (label,*args),status = argall
         assert cmd == 'runsub' and label == self.suplabels[level+1]
         if self.supstatus[level] != status:
           self.logger.log(25, 'Supervisor %s status %s superceded as %s',
@@ -908,6 +914,10 @@ class DMRGManager:
         self.suplabels.append(label)
         level += 1
         self.logger.log(10, 'Starting level-%s supervisor %s',level,label)
+      elif cmd == 'announce':
+        # Announcement
+        # TODO logging levels?
+        config.streamlog.log(30, args)
       else:
         # Algorithm-specific options
         sendval = self.supcommands[cmd](*args)
@@ -1176,14 +1186,21 @@ class DMRGOrthoManager(DMRGManager):
     self.Es = [None]
     self.s0s = [None]
     self.E0s = [None]
+    self.dschmidts = [0]
     super().__init__(Hamiltonian, chis, **kw_args)
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
-    self.__version = '0'
+    self.__version = '0.1'
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
       useguess=True)
+
+  def __setstate__(self, state):
+    super().__setstate__(state)
+    if self.__version == '0':
+      self.dschmidts = self.npsis*[0]
+      self.__version = '0.1'
 
   @property
   def psi(self):
@@ -1227,6 +1244,9 @@ class DMRGOrthoManager(DMRGManager):
     self.supcommands['newstate'] = self.newstate_center
     self.supcommands['select'] = self.selectpsi
     self.supcommands['clearall'] = self.clearcache
+    self.supcommands['shiftbench'] = self.shiftbenchmark
+    self.supcommands['benchmark1'] = self.benchmark1
+    self.supcommands['benchmark2'] = self.benchmark2
 
   def savestep(self):
     """Save output after completing bond-dimension optimization"""
@@ -1368,96 +1388,63 @@ class DMRGOrthoManager(DMRGManager):
 
   # TODO initialization for next states
   # def initstate(self):
+  def shiftbenchmark(self):
+    # Remove stored energies etc. for prior step, shift most recent back
+    for i,E in enumerate(self.Es):
+      if E is not None:
+        # Otherwise has not changed
+        self.E0s[i] = E
+    self.Es = self.npsis*[None]
+    self.dschmidts = self.npsis*[0]
+
+  def benchmark1(self):
+    # Get energy for current state
+    self.getE(savelast=False,updaterel=False)
+    config.streamlog.log(20, f'\t#%d %+12.4g E=%0.10f',self.psiindex,self.E-self.E0,self.E)
+
+  def benchmark2(self):
+    # Get energy & schmidt-difference for current state
+    self.getE(savelast=False,updaterel=False)
+    # TODO full RMS option?
+    Ldiff = 0
+    for n,l0 in enumerate(self.schmidt0):
+      l1 = self.psi._schmidt[n]
+      if isinstance(l0, dict):
+        # Dictionary by charge sector
+        viter = self.psi.getbond(n).full_iter()
+        l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+        for k in set(l1).intersection(set(l0)):
+          Ldiff += adiff(l0[k],l1[k])
+        for k in set(l1) - set(l0):
+          Ldiff += np.linalg.norm(l1[k])
+        for k in set(l0) - set(l1):
+          Ldiff += np.linalg.norm(l0[k])
+      else:
+        Ldiff += adiff(l0,l1)
+        l1 = copy(l1)
+      # Update history
+      self.schmidt0[n] = l1
+    Ldiff /= self.N
+    self.dschmidts[self.psiindex] = Ldiff
+    self.logger.log(15, '[#%d] schmidt diff %s', self.psiindex, Ldiff)
+    self.getE(savelast=False,updaterel=False)
+    self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
+    config.streamlog.log(25,f'\t#%d %10.4g %+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
+
   def compare1(self, niter, which='all'):
-    i0 = self.psiindex
-    if which is None:
-      which = i0
-    if niter == 0 and (which == 'all' or which == 0):
-      # TODO 'announce' routine
-      config.streamlog.log(30, 'Single update')
-    if which == 'all':
-      dEtot = 0
-      for i in self.npsis:
-        self.selectpsi(i,(-1,1),log=False)
-        self.getE()
-        Ediff = self.E-self.E0
-        self.logger.log(20, f'[% 3d]#%d %+12.4g E=%0.10f',niter,i,Ediff,self.E)
-        dEtot += abs(Ediff)
-      dEtot /= self.npsis
-      self.streamlog.log(30,f'[% 3d] %12.4g',niter,dEtot)
-    else:
-      self.selectpsi(which,(-1,1),log=False)
-      self.getE()
-      Ediff = self.E-self.E0
-      config.streamlog.log(30, f'[% 3d]#%d %+12.4g E=%0.10f',niter,which,Ediff,self.E)
-      dEtot = abs(Ediff)
-    self.selectpsi(i0,(-1,1),log=False)
+    assert which == 'all'
+    dEtot = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
+    self.streamlog.log(30,f'[% 3d] %12.4g',niter,dEtot)
     return dEtot
 
   def compare2(self, niter, which='all'):
-    i0 = self.psiindex
-    if which is None:
-      which = i0
-    if niter == 0 and (which == 'all' or which == 0):
-      config.streamlog.log(30, 'Double update')
-      # TODO 'announce' routine
-    if which == 'all':
-      dEtot = 0
-      Ldtot = 0
-      for i in range(self.npsis):
-        self.selectpsi(i,(-1,2),log=False)
-        self.getE()
-        Ldiff = 0
-        Ediff = self.E-self.E0
-        dEtot += abs(Ediff)
-        # TODO factor out L diff calculation
-        for n,l0 in enumerate(self.s0s[i]):
-          l1 = self.psilist[i]._schmidt[n]
-          if isinstance(l0, dict):
-            # Dictionary by charge sector
-            viter = self.psilist[i].getbond(n).full_iter()
-            l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
-            for k in set(l1).intersection(set(l0)):
-              Ldiff += adiff(l0[k],l1[k])
-            for k in set(l1) - set(l0):
-              Ldiff += np.linalg.norm(l1[k])
-            for k in set(l0) - set(l1):
-              Ldiff += np.linalg.norm(l0[k])
-          else:
-            Ldiff += adiff(l0,l1)
-            l1 = copy(l1)
-          self.s0s[i][n] = l1
-        Ldtot += Ldiff/self.npsis
-        # Update history
-        self.logger.log(20, f'[% 3d]#%d %10.4g %+10.4g E=%0.10f',niter,i,Ldiff,Ediff,self.E)
-      dEtot /= self.npsis
-      config.streamlog.log(30,f'[% 3d] %12.4g %12.4g',niter,Ldtot,dEtot)
-    else:
-      self.selectpsi(which,(-1,2),log=False)
-      self.getE()
-      Ediff = self.E-self.E0
-      dEtot = abs(Ediff)
-      Ldiff = 0
-      for n,l0 in enumerate(self.s0s[which]):
-        l1 = self.psilist[which]._schmidt[n]
-        if isinstance(l0, dict):
-          # Dictionary by charge sector
-          viter = self.psilist[which].getbond(n).full_iter()
-          l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
-          for k in set(l1).intersection(set(l0)):
-            Ldiff += adiff(l0[k],l1[k])
-          for k in set(l1) - set(l0):
-            Ldiff += np.linalg.norm(l1[k])
-          for k in set(l0) - set(l1):
-            Ldiff += np.linalg.norm(l0[k])
-        else:
-          Ldiff += adiff(l0,l1)
-          l1 = copy(l1)
-        self.s0s[which][n] = l1
-      config.streamlog.log(30, f'[% 3d]#%d %10.4g %+10.4g E=%0.10f',niter,which,Ldiff,Ediff,self.E)
-      # Update history
-      Ldtot = Ldiff
-    self.selectpsi(i0,(-1,2),log=False)
+    assert which == 'all'
+    dEtot = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
+    Ldtot = np.mean(self.dschmidts)
+    config.streamlog.log(30,f'[% 3d] %12.4g %12.4g',niter,Ldtot,dEtot)
+    if self.settings['eigtol_rel']:
+      self.eigtol = self.settings['eigtol_rel']*dEtot
+      self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
     return Ldtot
 
   def newstate_center(self):
@@ -1468,9 +1455,13 @@ class DMRGOrthoManager(DMRGManager):
       self.npsis,site)
     self.npsis += 1 
     self.psilist.append(copy(self.psilist[-1]))
-    self.Es.append(self.Es[-1])
+    Einit = self.Es[-1]
+    if Einit is None:
+      Einit = self.E0s[-1]
+    self.Es.append(Einit)
     self.E0s.append(None)
     self.s0s.append(None)
+    self.dschmidts.append(0)
     self.selectpsi(self.npsis-1,(site-1,site+2))
     #self.getrighttransfers(site+2)
     #self.getlefttransfers(site-1)
@@ -1870,6 +1861,7 @@ class DMRGOrthoManager(DMRGManager):
     return list(self.psilist)
 
 def doubleOrthoSupervisor(N, settings, state=None):
+  yield 'announce', 'Double update'
   if state is None:
     psi0 = 0 # Starting index of state
     niter = 0 # Iterations (after adding new state)
@@ -1880,27 +1872,42 @@ def doubleOrthoSupervisor(N, settings, state=None):
     niter,psi0,npsi = state
     if psi0 == 'bakein':
       psi0 = npsi-1
-      #yield 'select',(npsi-1) # Should already be selected
       for n in range(niter,settings['bakein']):
+        yield 'announce', f'[{n}/{settings["bakein"]}]'
         yield 'runsub', ('doublesweep',N), (n,'bakein',npsi)
-        yield 'compare2', (n,npsi-1)
+        yield 'benchmark2', ()
+        yield 'shiftbench', ()
+        yield 'saveschmidt', ()
+      yield 'select', (0,(-1,2))
       niter = 0
+      psi0 = 0
     newpsi = False
   while newpsi or (niter < settings['nsweep2']):
     if newpsi:
+      if (niter-1)%settings['ncanon2'] != 0:
+        yield 'select',(npsi-1,None)
+        yield 'canonical', ()
+        yield 'righttransf', (2,)
       yield 'newstate', ()
+      yield 'shiftbench', ()
       npsi += 1
       yield 'righttransf', (2,)
       yield 'saveschmidt', ()
       for n in range(settings['bakein']):
+        yield 'announce', f'[{n}/{settings["bakein"]}]'
         yield 'runsub', ('doublesweep',N), (n,'bakein',npsi)
-        yield 'compare2', (n,npsi-1)
+        yield 'benchmark2', ()
+        yield 'shiftbench', ()
+        yield 'saveschmidt', ()
+      yield 'select', (0,(-1,2))
       niter = 0
       psi0 = 0
     for ipsi in range(psi0,npsi):
       E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsi)
+      yield 'benchmark2', ()
       if ipsi+1 != npsi:
-        yield 'select', (ipsi,(-1,2))
+        yield 'select', (ipsi+1,(-1,2))
+      yield 'saveschmidt', ()
     psi0 = 0
     if niter % settings['ncanon2'] == 0:
       yield 'clearall', ()
@@ -1918,6 +1925,8 @@ def doubleOrthoSupervisor(N, settings, state=None):
         yield 'canonical', (True,)
       break
     niter += 1
+    yield 'shiftbench', ()
+    yield 'saveschmidt', ()
   if niter == settings['nsweep2']:
     niter -= 1
   if niter % settings['ncanon2'] != 0:
@@ -1925,9 +1934,12 @@ def doubleOrthoSupervisor(N, settings, state=None):
     for ipsi in range(npsi):
       yield 'select', (ipsi,None)
       yield 'canonical',(True,)
+  yield 'shiftbench', ()
+  yield 'select', (0,None)
   yield 'complete', ()
   
 def singleOrthoSupervisor(N, settings, state=None):
+  yield 'announce', 'Single update'
   if state is None:
     psi0 = 0
     i0 = 0
@@ -1941,7 +1953,9 @@ def singleOrthoSupervisor(N, settings, state=None):
   for niter in range(i0, settings['nsweep1']):
     for ipsi in range(psi0,npsi):
       yield 'select', (ipsi,(-1,1))
+      yield 'saveschmidt', ()
       E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsi)
+      yield 'benchmark2', ()
     psi0 = 0
     diff = yield 'compare2', (niter,)
     if diff < settings['schmidtdelta1']:
@@ -1955,10 +1969,13 @@ def singleOrthoSupervisor(N, settings, state=None):
         yield 'select',(ipsi,None)
         yield 'righttransf', (1,) #TODO use gauge?
       yield 'select', (0,None)
+    yield 'shiftbench', ()
   if niter % settings['ncanon1'] != 0:
     yield 'clearall', ()
     for ipsi in range(npsi):
       yield 'select',(ipsi,None)
       yield 'canonical', (True,)
+  yield 'shiftbench', ()
+  yield 'select', (0,None)
   yield 'complete', ()
   
