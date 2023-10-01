@@ -462,6 +462,8 @@ class NetworkOperator(TensorOperator):
           if clause == t:
             tidx = argidx
             continue
+          if not isinstance(args[argidx],Tensor):
+            raise TypeError(f'Argument #{argidx+1} (corresponding to substring "{clause}") is not a Tensor, instead {type(args[argidx])}')
           ts = clause.split(',')
           for t1 in ts:
             if t1[-1] == '*':

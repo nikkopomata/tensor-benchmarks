@@ -353,7 +353,7 @@ class DMRGManager:
   
   def settingbyindex(self, idx, **kw_args):
     if isinstance(idx, int):
-      self.settingbychi(self.chis[idx])
+      self.settingbychi(self.chis[idx], **kw_args)
     else:
       for i in idx:
         self.settingbychi(self.chis[i], **kw_args)
@@ -857,6 +857,9 @@ class DMRGManager:
       self.logger.log(10, 'Resuming base supervisor')
       self.logger.log(5, 'Using state %s', self.supstatus[0])
       config.streamlog.log(30, 'Resuming: chi = % 3d (#%s)', self.chi, self.chiindex)
+      if self.chi in self.chirules:
+        self.logger.debug('Found settings of %s at bond dimension %d',list(self.chirules[self.chi]),self.chi)
+        self.settings.update(self.chirules[self.chi])
       # Initialize saved supervisors
       sup = self.supfunctions['base'](self.chis, self.N, self.settings, state=self.supstatus[0])
       self.supervisors = [sup]
@@ -1571,21 +1574,48 @@ class DMRGOrthoManager(DMRGManager):
           state = 'H'
         else:
           state = idx-1
-        if tL.id.hex not in keys:
+        if tL[0].id.hex not in keys:
           self.logger.warn('Left boundary transfer vector (%s) missing; restoring',state)
-          tL.compute(None)
+          tL[0].compute(None)
         for n in range(1,self.ntransfL):
           if tL[n].id.hex not in keys:
             self.logger.warn('Left transfer vector at %s (%s) missing; '
               'restoring',n,state)
           tL[n].compute(tL[n-1].T)
         assert len(tL) == self.ntransfL
-      valid_keys = {t.id.hex for tlist in (self.rtransflist+self.ltransflist) for t in tlist}
-      for k in keys - valid_keys:
-        self.logger.info('Removing unidentified key %s',k)
-        del self.database[k]
-      self.logger.log(8,'%d valid keys (%d), %d left transfers, %d right transfers, state #%d',len(valid_keys),len(self.database),self.ntransfL,self.ntransfR,self.psiindex)
-    assert len(self.database) == (self.npsis)*(self.ntransfL + self.ntransfR)
+    valid_keys = {t.id.hex for tlist in (self.rtransflist+self.ltransflist) for t in tlist}
+    for k,tL in self.transfcacheL.items():
+      n = 0
+      while n < len(tL) and tL[n].id.hex in keys:
+        valid_keys.add(tL[n].id.hex)
+        n += 1
+      # Delete additional
+      if n < len(tL):
+        self.logger.info('Cached left transfer chain %s broken at %d of %d,'
+          'deleting remainder',k,n,len(tL))
+        while len(tL) > n:
+          T = tL.pop()
+          if T.id.hex in keys:
+            del self.database[T.id.hex]
+    for k,tR in self.transfcacheR.items():
+      nt = len(tR)
+      n = nt-1
+      while n >= 0 and tR[n].id.hex in keys:
+        valid_keys.add(tR[n].id.hex)
+        n -= 1
+      # Delete additional
+      if n >= 0:
+        self.logger.info('Cached right transfer chain %s broken at %d of %d,'
+          'deleting remainder',k,n,nt)
+        while len(tR)+n >= nt:
+          T = tR.pop(0)
+          if T.id.hex in keys:
+            del self.database[T.id.hex]
+    for k in keys - valid_keys:
+      self.logger.info('Removing unidentified key %s',k)
+      del self.database[k]
+    self.logger.log(8,'%d valid keys (%d), %d left transfers, %d right transfers, state #%d',len(valid_keys),len(self.database),self.ntransfL,self.ntransfR,self.psiindex)
+    assert len(self.database) == (self.npsis)*(self.ntransfL + self.ntransfR) + sum(len(tL) for tL in self.transfcacheL.values()) + sum(len(tR) for tR in self.transfcacheR.values())
     # TODO change to match collection setting
 
   @property
