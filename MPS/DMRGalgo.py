@@ -841,7 +841,12 @@ class DMRGManager:
       self.psi.lgauge(gauge,site)
 
   def returnvalue(self):
+    """Define return value for completed run()"""
     return self.psi, self.E
+
+  def baseargs(self):
+    """Define arguments for base supervisor"""
+    return self.chis, self.N, self.settings
 
   def run(self):
     if self.supstatus == 'complete':
@@ -850,7 +855,7 @@ class DMRGManager:
     if not self.supervisors:
       # Initialize base
       self.logger.log(10, 'Initializing base supervisor')
-      self.supervisors.append(self.supfunctions['base'](self.chis, self.N, self.settings))
+      self.supervisors.append(self.supfunctions['base'](*self.baseargs()))
       self.suplabels.append('base')
       self.supstatus.append(None)
     elif self.supervisors == 'paused':
@@ -861,7 +866,7 @@ class DMRGManager:
         self.logger.debug('Found settings of %s at bond dimension %d',list(self.chirules[self.chi]),self.chi)
         self.settings.update(self.chirules[self.chi])
       # Initialize saved supervisors
-      sup = self.supfunctions['base'](self.chis, self.N, self.settings, state=self.supstatus[0])
+      sup = self.supfunctions['base'](*self.baseargs(), state=self.supstatus[0])
       self.supervisors = [sup]
       level = 0
       while len(self.supervisors) < len(self.supstatus):
@@ -1176,7 +1181,7 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
 class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
   def __init__(self, Hamiltonian, chis, npsis, ortho_tol=1e-7, keig=1,
-      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,persiteshift=0,
+      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,nsweepadd=10,persiteshift=0,
       **kw_args):
     self.psiindex = 0
     self.npsi_tot = npsis
@@ -1194,16 +1199,59 @@ class DMRGOrthoManager(DMRGManager):
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
-    self.__version = '0.1'
+    self.__version = '0.2'
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
-      useguess=True)
+      nsweepadd=nsweepadd,useguess=True)
 
   def __setstate__(self, state):
     super().__setstate__(state)
     if self.__version == '0':
       self.dschmidts = self.npsis*[0]
       self.__version = '0.1'
+    if self.__version == '0.1':
+      # Update status
+      if self.npsi_tot > self.npsis:
+        # Put (back) in add-state mode
+        if self.supstatus == 'complete':
+          self.supstatus = []
+          self.suplabels = ['base']
+        basestat = self.supstatus[0]
+        labels = list(self.suplabels)
+        self.supstatus[0] = (self.chi,self.npsis,0)
+        self.suplabels[1] = 'addstate'
+        if len(labels) > 1:
+          if labels[1] == 'double':
+            # Directly translates
+            niter,psi0,npsi = state
+            if psi0 == 'bakein':
+              self.supstatus[1] = (niter,'bakein',npsi)
+            else:
+              niter1 = min(niter,self.settings['nsweepadd']-1)
+              self.supstatus[1] = (niter1,psi0,npsi)
+          else:
+            assert labels[1] == 'single':
+            # Back to the start of the addstate supervisor
+            if len(labels) == 3:
+              assert self.suplabels.pop() == 'singlesweep'
+              # Need to re-gauge state
+              n, d, g = self.supstatus.pop()
+              if g is not None:
+                if d == 'r' or n == self.N-1:
+                  self.psi.lgauge(g,n)
+                else:
+                  self.psi.rgauge(g,n)
+            self.suplabels.pop()
+            self.supstatus.pop()
+            # Put in canonical form
+            self.clearcache()
+            for ipsi in range(self.npsis):
+              self.selectpsi(ipsi,None)
+              self.restorecanonical()
+      else:
+        # Add npsis to base status
+        self.supstatus[0] = self.supstatus[0]+(self.npsis,)
+      self.__version = '0.2'
 
   @property
   def psi(self):
@@ -1240,6 +1288,8 @@ class DMRGOrthoManager(DMRGManager):
   def _initfuncs(self):
     super()._initfuncs()
     # Labels for supervisors
+    self.supfunctions['base'] = orthoBaseSupervisor
+    self.supfunctions['addstate'] = addStateSupervisor
     self.supfunctions['double'] = doubleOrthoSupervisor
     self.supfunctions['single'] = singleOrthoSupervisor
     # Labels for bound methods
@@ -1890,7 +1940,133 @@ class DMRGOrthoManager(DMRGManager):
   def returnvalue(self):
     return list(self.psilist)
 
-def doubleOrthoSupervisor(N, settings, state=None):
+  def baseargs(self):
+    return self.chis, self.N, self.npsi_tot, self.npsis, self.settings
+
+def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
+  if state is None:
+    yield 'init',()
+    cidx = 0
+    yield 'setchi',(0,chis[0])
+    npsis = np0
+  else:
+    chi,npsis,nupdate = state
+    cidx = chis.index(chi)
+    if nupdate == 1:
+      # Complete bond-dimension cycle
+      yield 'runsub',('single',N,npsis),(chi,npsis,1)
+      cidx += 1
+      if cidx == len(chis):
+        yield 'complete',()
+        return
+      else:
+        yield 'savestep', ()
+        yield 'setchi',(cidx,chis[cidx])
+  # First add all states
+  while npsis < npsitot:
+    yield 'runsub',('addstate',N,npsis),(chis[cidx],npsis,0)
+    npsis += 1
+  while cidx < len(chis):
+    yield 'runsub',('double',N,npsis),(chis[cidx],npsis,2)
+    yield 'runsub',('single',N,npsis),(chis[cidx],npsis,1)
+    cidx += 1
+    if cidx < len(chis):
+      yield 'savestep', ()
+      yield 'setchi',(cidx,chis[cidx])
+  yield 'complete',()
+
+def doubleOrthoSupervisor(N, npsis, settings, state=None):
+  # Only perform double update--do not introduce new states
+  yield 'announce', 'Double update'
+  if state is None:
+    psi0 = 0 # Starting index of state
+    n0 = 0 # Current niter
+    yield 'righttransf', (2,)
+    yield 'saveschmidt', ()
+  else:
+    n0,psi0,npsis = state
+  for niter in range(n0,settings['nsweep2']):
+    for ipsi in range(psi0,npsis):
+      E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsis)
+      yield 'benchmark2', ()
+      if ipsi+1 != npsis:
+        yield 'select', (ipsi+1,(-1,2))
+      yield 'saveschmidt', ()
+    psi0 = 0
+    diff = yield 'compare2', (niter,)
+    if diff < settings['schmidtdelta']:
+      yield 'clearall', ()
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      break
+    if niter % settings['ncanon2'] == 0:
+      yield 'clearall', ()
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'righttransf', (2,) #TODO use gauge?
+    yield 'select',(0,(-1,2))
+    yield 'shiftbench', ()
+    yield 'saveschmidt', ()
+  yield 'shiftbench', ()
+  yield 'select', (0,None)
+  yield 'complete', ()
+
+def addStateSupervisor(N, npsi, settings, state=None):
+  # Supervisor for introducing one new state, baking in, & performing some
+  # optimization
+  if state is None:
+    psi0 = 'bakein' # Will be starting by initializing new state
+    niter = 0 # Iterations (after adding new state)
+    yield 'newstate', ()
+    yield 'shiftbench', ()
+    npsi += 1
+    yield 'righttransf', (2,)
+    yield 'saveschmidt', ()
+  else:
+    niter,psi0,npsi = state
+  if psi0 == 'bakein':
+    psi0 = npsi-1
+    for n in range(niter,settings['bakein']):
+      yield 'announce', f'[{n}/{settings["bakein"]}]'
+      yield 'runsub', ('doublesweep',N), (n,'bakein',npsi)
+      yield 'benchmark2', ()
+      yield 'shiftbench', ()
+      yield 'saveschmidt', ()
+    yield 'select', (0,(-1,2))
+    yield 'saveschmidt', ()
+    niter = 0
+    psi0 = 0
+  while niter < settings['nsweepadd']:
+    for ipsi in range(psi0,npsi):
+      E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsi)
+      yield 'benchmark2', ()
+      yield 'saveschmidt', ()
+      if ipsi+1 != npsi:
+        yield 'select', (ipsi+1,(-1,2))
+    psi0 = 0
+    # Just put everything in canonical form
+    yield 'clearall', ()
+    for ipsi in range(npsi):
+      yield 'select',(ipsi,None)
+      yield 'canonical', (True,)
+    for ipsi in range(npsi):
+      yield 'select',(ipsi,None)
+      yield 'righttransf', (2,) #TODO use gauge?
+    diff = yield 'compare2', (niter,)
+    yield 'select',(0,(-1,2))
+    if diff < settings['newthresh']:
+      break
+    niter += 1
+    yield 'shiftbench', ()
+    yield 'saveschmidt', ()
+  yield 'complete', ()
+
+def doubleOrthoSupervisorCombined(N, settings, state=None):
+  # Both introduce new states & perform ordinary double update
   yield 'announce', 'Double update'
   if state is None:
     psi0 = 0 # Starting index of state
@@ -1968,23 +2144,23 @@ def doubleOrthoSupervisor(N, settings, state=None):
   yield 'select', (0,None)
   yield 'complete', ()
   
-def singleOrthoSupervisor(N, settings, state=None):
+def singleOrthoSupervisor(N, npsis, settings, state=None):
   yield 'announce', 'Single update'
   if state is None:
     psi0 = 0
     i0 = 0
     yield 'righttransf', (1,)
     yield 'saveschmidt', ()
-    npsi = yield 'select', (psi0,(-1,1))
+    npsis = yield 'select', (psi0,(-1,1))
   else:
-    i0,psi0,npsi = state
+    i0,psi0,npsis = state
     yield 'runsub',('singlesweep',N),state
     psi0 += 1
   for niter in range(i0, settings['nsweep1']):
-    for ipsi in range(psi0,npsi):
+    for ipsi in range(psi0,npsis):
       yield 'select', (ipsi,(-1,1))
       yield 'saveschmidt', ()
-      E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsi)
+      E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsis)
       yield 'benchmark2', ()
     psi0 = 0
     diff = yield 'compare2', (niter,)
@@ -1992,17 +2168,17 @@ def singleOrthoSupervisor(N, settings, state=None):
       break
     if niter % settings['ncanon1'] == 0:
       yield 'clearall', ()
-      for ipsi in range(npsi):
+      for ipsi in range(npsis):
         yield 'select',(ipsi,None)
         yield 'canonical', (True,)
-      for ipsi in range(npsi):
+      for ipsi in range(npsis):
         yield 'select',(ipsi,None)
         yield 'righttransf', (1,) #TODO use gauge?
       yield 'select', (0,None)
     yield 'shiftbench', ()
   if niter % settings['ncanon1'] != 0:
     yield 'clearall', ()
-    for ipsi in range(npsi):
+    for ipsi in range(npsis):
       yield 'select',(ipsi,None)
       yield 'canonical', (True,)
   yield 'shiftbench', ()
