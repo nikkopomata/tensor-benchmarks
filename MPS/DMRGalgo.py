@@ -204,7 +204,8 @@ class DMRGManager:
                         'singleupdateright':self.singleupdateright,
                         'doubleupdateleft':self.doubleupdateleft,
                         'doubleupdate':self.doubleupdate,
-                        'doubleupdateright':self.doubleupdateright}
+                        'doubleupdateright':self.doubleupdateright,
+                        'resettol':self.resettol}
     self.callables = {}
 
   def _initlog(self):
@@ -420,6 +421,12 @@ class DMRGManager:
     """Save output after optimizing a single bond dimension"""
     self.logger.log(20,'Saving completed bond dimension %s',self.chi)
     pickle.dump((self.psi,self.E),open(f'{self.saveprefix}c{self.chi}.p','wb'))
+
+  def resettol(self):
+    """Reset eigtol_rel to eigtol"""
+    if self.settings['eigtol'] is not None:
+      self.logger.log(10,'Resetting eigtol_rel to %s',self.settings['eigtol'])
+      self.eigtol = self.settings['eigtol']
 
   def initstate(self):
     # Options for passing MPS
@@ -1230,7 +1237,7 @@ class DMRGOrthoManager(DMRGManager):
               niter1 = min(niter,self.settings['nsweepadd']-1)
               self.supstatus[1] = (niter1,psi0,npsi)
           else:
-            assert labels[1] == 'single':
+            assert labels[1] == 'single'
             # Back to the start of the addstate supervisor
             if len(labels) == 3:
               assert self.suplabels.pop() == 'singlesweep'
@@ -1252,6 +1259,7 @@ class DMRGOrthoManager(DMRGManager):
         # Add npsis to base status
         self.supstatus[0] = self.supstatus[0]+(self.npsis,)
       self.__version = '0.2'
+    self.settings['nsweepadd'] = 10
 
   @property
   def psi(self):
@@ -2026,6 +2034,7 @@ def addStateSupervisor(N, npsi, settings, state=None):
     npsi += 1
     yield 'righttransf', (2,)
     yield 'saveschmidt', ()
+    yield 'resettol', ()
   else:
     niter,psi0,npsi = state
   if psi0 == 'bakein':
@@ -2036,6 +2045,7 @@ def addStateSupervisor(N, npsi, settings, state=None):
       yield 'benchmark2', ()
       yield 'shiftbench', ()
       yield 'saveschmidt', ()
+      yield 'resettol', ()
     yield 'select', (0,(-1,2))
     yield 'saveschmidt', ()
     niter = 0
@@ -2067,6 +2077,7 @@ def addStateSupervisor(N, npsi, settings, state=None):
 
 def doubleOrthoSupervisorCombined(N, settings, state=None):
   # Both introduce new states & perform ordinary double update
+  # Depricated
   yield 'announce', 'Double update'
   if state is None:
     psi0 = 0 # Starting index of state
