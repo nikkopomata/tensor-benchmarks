@@ -457,6 +457,7 @@ class MPSgeneric(ABC):
       bstrs = ['L.b-B0.l','L.t-T0.l']
       Ts.append(lterm)
     elif lterm:
+      assert lterm == True
       if self.issite(x0-1):
         #print('left term at',x0)#DEBUG
         # Contract left indices
@@ -483,6 +484,7 @@ class MPSgeneric(ABC):
       bstrs.extend([f'R.b-B{dx}.r',f'R.t-T{dx}.r'])
       Ts.append(rterm)
     elif rterm:
+      assert rterm == True
       if self.issite(xf+1):
         bstrs.append(f'B{dx}.r-T{dx}.r')
         Ts[-1] = Ts[-1].diag_mult('r',self.getschmidt(xf))

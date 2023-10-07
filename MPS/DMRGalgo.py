@@ -1258,8 +1258,10 @@ class DMRGOrthoManager(DMRGManager):
       else:
         # Add npsis to base status
         self.supstatus[0] = self.supstatus[0]+(self.npsis,)
+      self.settings['nsweepadd'] = 10
       self.__version = '0.2'
-    self.settings['nsweepadd'] = 10
+    if self.__version == '0.2':
+      self.eigtol = abs(self.eigtol)
 
   @property
   def psi(self):
@@ -1490,21 +1492,34 @@ class DMRGOrthoManager(DMRGManager):
     self.logger.log(15, '[#%d] schmidt diff %s', self.psiindex, Ldiff)
     self.getE(savelast=False,updaterel=False)
     self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
-    config.streamlog.log(25,f'\t#%d %10.4g %+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
+    config.streamlog.log(25,f'\t#%d %#10.4g %#+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
 
   def compare1(self, niter, which='all'):
     assert which == 'all'
     dEtot = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
-    self.streamlog.log(30,f'[% 3d] %12.4g',niter,dEtot)
+    self.streamlog.log(30,f'[% 3d] %#12.4g',niter,dEtot)
     return dEtot
 
   def compare2(self, niter, which='all'):
     assert which == 'all'
-    dEtot = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
+    try:
+      dEavg = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
+    except TypeError:
+      psi0 = self.psiindex
+      while any(E is None for E in self.Es):
+        inone = self.Es.index(None)
+        self.logger.critical('Energy of state #%d not recorded; recalculating',
+          inone)
+        self.selectpsi(inone,None)
+        self.benchmark2()
+      dEavg = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
+      self.selectpsi(psi0,None)
+        
+    dEtot = np.sum(self.Es)-np.sum(self.E0s)
     Ldtot = np.mean(self.dschmidts)
-    config.streamlog.log(30,f'[% 3d] %12.4g %12.4g',niter,Ldtot,dEtot)
+    config.streamlog.log(30,f'[% 3d] %#12.4g %#12.4g : %#+12.4g',niter,Ldtot,dEavg,dEtot)
     if self.settings['eigtol_rel']:
-      self.eigtol = self.settings['eigtol_rel']*dEtot
+      self.eigtol = self.settings['eigtol_rel']*dEavg
       self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
     return Ldtot
 
@@ -2165,13 +2180,14 @@ def singleOrthoSupervisor(N, npsis, settings, state=None):
     npsis = yield 'select', (psi0,(-1,1))
   else:
     i0,psi0,npsis = state
-    yield 'runsub',('singlesweep',N),state
-    psi0 += 1
+    resume = True
   for niter in range(i0, settings['nsweep1']):
     for ipsi in range(psi0,npsis):
-      yield 'select', (ipsi,(-1,1))
-      yield 'saveschmidt', ()
+      if not resume:
+        yield 'select', (ipsi,(-1,1))
+        yield 'saveschmidt', ()
       E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsis)
+      resume = False
       yield 'benchmark2', ()
     psi0 = 0
     diff = yield 'compare2', (niter,)
