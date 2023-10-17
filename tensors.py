@@ -1437,7 +1437,8 @@ class Tensor:
         raise ValueError('Matrix supplied must be square')
       d = np.diag(d)
     if len(d) != self.shape[ll]:
-      raise ValueError('Dimension does not match')
+      raise ValueError(f'Dimension does not match ({len(d)} provided vs'
+        f' dim({ll})={self.shape[ll]})')
     ii = self._idxs.index(ll)
     Ttr = np.moveaxis(self._T,ii,-1)
     T1 = np.multiply(Ttr,d)
