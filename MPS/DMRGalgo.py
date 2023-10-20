@@ -309,20 +309,28 @@ class DMRGManager:
       elif state['_DMRGManager__version'][0] == '0':
         # Registered-object form
         self._ROstatespec = [self.ntransfL,self.ntransfR]
+        self._registry = {}
+        self._activeRO = set()
+        self._inactiveRO = set()
         for n in range(self.ntransfL):
           self._registry[n,'l'] = self.transfLs[n]
           self._activeRO.add((n,'l'))
         for n in range(self.ntransfL,self.N-1):
-          self._registry[n,'l'] = mpsbasic.LeftTransferManaged(self.psi,n,'l',
+          self._registry[n,'l'] = LeftTransferManaged(self.psi,n,'l',
             self.H,manager=self)
           self._inactiveRO.add((n,'l'))
         for n in range(self.N-self.ntransfR,self.N):
-          self._registry[n,'r'] = self.ntransfRs[n-self.N+self.ntransfR]
+          self._registry[n,'r'] = self.transfRs[n-self.N+self.ntransfR]
           self._activeRO.add((n,'r'))
         for n in range(1,self.N-self.ntransfR):
-          self._registry[n,'r'] = mpsbasic.RightTransferManaged(self.psi,n,'r',
+          self._registry[n,'r'] = RightTransferManaged(self.psi,n,'r',
             self.H,manager=self)
           self._inactiveRO.add((n,'r'))
+        delattr(self, 'ntransfR')
+        delattr(self, 'ntransfL')
+        delattr(self, 'transfRs')
+        delattr(self, 'transfLs')
+        self.__version = '1.0'
       # TODO recovery options if directory is expected but does not exist
     self.chirules = {}
     self._initfuncs()
@@ -331,6 +339,7 @@ class DMRGManager:
   # "Registered objects" (here transfer vectors)--
   # all management should pass through these functions
 
+  ### General methods 
   def fetchRO(self, key):
     if key not in self._activeRO:
       if key in self._inactiveRO:
@@ -341,13 +350,52 @@ class DMRGManager:
         raise KeyError(f'Registered object requested {key} not existent')
     return self._registry[key]
 
-  def _produceRO(self, key):
+  def _produceRO(self, key, **kw_args):
     assert key in self._inactiveRO 
     assert key not in self._activeRO
-    self._computeRO(key)
+    self._computeRO(key, **kw_args)
     self._activeRO.add(key)
     self._inactiveRO.remove(key)
 
+  def refreshRO(self, key):
+    assert key in self._activeRO
+    self._computeRO(key)
+
+  def _discardRO(self, key):
+    self._registry[key].discard()
+    self._activeRO.remove(key)
+    self._inactiveRO.add(key)
+
+  def _updateROstate(self, statespec, **kw_args):
+    self._validateROstate(statespec)
+    self.logger.debug('Updating registry to state %s',statespec)
+    newactive = self.ROstatelist(statespec)
+    # Add new *in order*
+    for key in newactive:
+      if key in self._inactiveRO:
+        self._produceRO(key, **kw_args)
+    self._ROstatespec = statespec
+    # Discard extranneous
+    for key in self._activeRO - set(newactive):
+      self._discardRO(key)
+
+  def clearall(self):
+    self._updateROstate(self._nullROstate)
+    assert not self._activeRO
+    assert self._inactiveRO == set(self._registry)
+
+  def expandROs(self, extension, statespec):
+    """Expand registered objects with dictionary of new *inactive* objects
+    & new specifier
+    Assume internal changes have to expand permissible registry have already
+    been performed"""
+    assert isinstance(extension,dict) and not (set(extension) & set(self._registry))
+    assert set(self.ROstatelist(statespec)) == self._activeRO
+    self._registry.update(extension)
+    self._inactiveRO.update(extension)
+    self._ROstatespec = statespec
+
+  ### Specific methods
   def _computeRO(self, key):
     site, direction = key
     transf = self._registry[key]
@@ -366,14 +414,9 @@ class DMRGManager:
         assert (site-1,'l') in self._activeRO
         transf.compute(self._registry[site-1,'l'].T)
 
-  def refreshRO(self, key):
-    assert key in self._activeRO
-    self._computeRO(key)
-
-  def _discardRO(self, key):
-    self._registry[key].discard()
-    self._activeRO.remove(key)
-    self._inactiveRO.add(key)
+  @property
+  def _nullROstate(self):
+    return (0,0)
 
   def _initializeROs(self,statespec=None):
     for site in range(self.N-1):
@@ -421,42 +464,20 @@ class DMRGManager:
           return False
     return site == self._registry[key].site
 
-  def _updateROstate(self, statespec):
-    self._validateROstate(statespec)
-    self.logger.debug('Updating registry to state %s',statespec)
-    newactive = self.ROstatelist(statespec)
-    # Add new *in order*
-    for key in newactive:
-      if key in self._inactiveRO:
-        self._produceRO(key)
-    self._ROstatespec = statespec
-    # Discard extranneous
-    for key in self._activeRO - set(newactive):
-      self._discardRO(key)
-
   def _ROcheckdbentries(self, key):
     """Confirm existence of 'database' entry/entries"""
     transf = self._registry[key]
     if transf.id.hex not in self.database:
       # Re-compute
-      site,lr = key
-      self.logger.warn('%s transfer vector at site %d missing; restoring',
-        'Right' if lr == 'r' else 'Left', site)
+      site,lr,*arg = key
+      self.logger.warn('%s %stransfer vector at site %d missing; restoring',
+        'Right' if lr == 'r' else 'Left', site, arg if arg else '')
       if site == 0 or site == self.N-1:
         transf.compute(None)
       else:
         site0 = site + (1 if lr == 'r' else -1)
-        transf.compute(self._registry[site0,lr].T)
+        transf.compute(self._registry[(site0,lr)+arg].T)
     return {transf.id.hex}
-
-  def clearall(self):
-    self._updateROstate(self._nullROstate)
-    assert not self._activeRO
-    assert self._inactiveRO == set(self._registry)
-
-  @property
-  def _nullROstate(self):
-    return (0,0)
 
   def ROstatelist(self, statespec):
     ntl,ntr = statespec
@@ -558,7 +579,7 @@ class DMRGManager:
   def getE(self, savelast=True, updaterel=True):
     if savelast:
       self.E0 = self.E
-    if self._ROstatespec[0] == 0 and self._ROstatespec[1] == 0:
+    if self.nlefttransf == 0 and self.nrighttransf == 0:
       assert not self.E
       self.E = np.real(self.H.expv(self.psi))
       self.logger.log(25,'Initial energy %s',self.E)
@@ -1221,7 +1242,8 @@ class DMRGOrthoManager(DMRGManager):
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
-    self.__version = '0.2'
+    self.__version = '1.0'
+    self._ROstatespec = np.zeros((self.npsis,self.npsis),dtype=int)
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
       nsweepadd=nsweepadd,useguess=True)
@@ -1277,6 +1299,91 @@ class DMRGOrthoManager(DMRGManager):
       self.__version = '0.2'
     if self.__version == '0.2':
       self.eigtol = abs(self.eigtol)
+      # transfLs/transfRs will have been converted from old form,
+      # correct registered objects as appropriate for ortho form
+      ntL,ntR = self._ROstatespec
+      active,reg = self._activeRO,self._registry
+
+      self._ROstatespec = np.zeros((self.npsis,self.npsis,2),dtype=int)
+      self._activeRO = set()
+      self._inactiveRO = set()
+      self._registry = {}
+      ipsi = self.psiindex
+      for n,lr in reg:
+        key = (n,lr,ipsi)
+        self._registry[key] = reg[n,lr]
+        if (n,lr) in active:
+          self._activeRO.add(key)
+        else:
+          self._inactiveRO.add(key)
+      self._ROstatespec[ipsi,ipsi,:] = ntL,ntR
+
+      for i,j in self.dottransfR:
+        assert len(self.dottransfR[i,j]) == ntR
+        phi,psi = self.psilist[i],self.psilist[j]
+        for n,tR in enumerate(self.dottransfR[i,j]):
+          key = (n-self.N+ntR,'r',i,j)
+          self._registry[key] = tR
+          self._activeRO.add(key)
+        self._ROstatespec[i,j,:] = (ntL,ntR)
+        tLs = self.dottransfL.pop((i,j))
+        assert len(tLs) == ntL
+        for n,tL in enumerate(tLs):
+          key = (n,'l',i,j)
+          self._registry[key] = tL
+          self._activeRO.add(key)
+      # Should have gone through everything
+      assert not self.dottransfL
+      for i,j in self.transfcacheR:
+        tRs = self.transfcacheR.pop((i,j))
+        tLs = self.transfcacheL.pop((i,j))
+        phi,psi = self.psilist[i],self.psilist[j]
+        nL,nR = len(tLs),len(tRs)
+        self._ROstatespec[i,j,:] = (nL,nR)
+        assert not np.any(self._ROstatespec[j,i,:])
+        for n,tR in enumerate(tRs):
+          key = (n-self.N+len(tRs),'r',i,j)
+          self._registry[key] = tR
+          self._activeRO.add(key)
+        for n,tL in enumerate(tLs):
+          key = (n,'l',i,j)
+          self._registry[key] = tL
+          self._activeRO.add(key)
+      assert not self.transfcacheL
+      # Generate empty transfers
+      for i in range(self.npsis):
+        for j in range(self.npsis):
+          phi,psi = self.psilist[i],self.psilist[j]
+          nL,nR = self._ROstatespec[i,j,:]
+          if i == j:
+            k0 = (i,)
+            phi = self.H
+          else:
+            k0 = (i,j)
+          for n in range(1,self.N-nR):
+            key = (n,'r') + k0
+            self._inactiveRO.add(key)
+            self._registry[key] = RightTransferManaged(psi, n, 'r', phi,
+              manager=self)
+          for n in range(nL,self.N-1):
+            key = (n,'l')+k0
+            self._inactiveRO.add(key)
+            self._registry[key] = LeftTransferManaged(psi, n, 'l', phi,
+              manager=self)
+
+      delattr(self, 'dottransfR')
+      delattr(self, 'dottransfL')
+      delattr(self, 'transfcacheL')
+      delattr(self, 'transfcacheR')
+      self.__version = '1.0'
+
+  @property
+  def nlefttransf(self):
+    return self._ROstatespec[self.psiindex,self.psiindex,0]
+
+  @property
+  def nrighttransf(self):
+    return self._ROstatespec[self.psiindex,self.psiindex,1]
 
   @property
   def psi(self):
@@ -1321,7 +1428,7 @@ class DMRGOrthoManager(DMRGManager):
     self.supcommands['addstatecond'] = self.check_add_state
     self.supcommands['newstate'] = self.newstate_center
     self.supcommands['select'] = self.selectpsi
-    self.supcommands['clearall'] = self.clearcache
+    self.supcommands['clearall'] = self.clearall
     self.supcommands['shiftbench'] = self.shiftbenchmark
     self.supcommands['benchmark1'] = self.benchmark1
     self.supcommands['benchmark2'] = self.benchmark2
@@ -1340,128 +1447,128 @@ class DMRGOrthoManager(DMRGManager):
       return self.npsis,True
     return self.npsis, (self.npsi_tot > self.npsis and delta is not None and delta < self.settings['newthresh'])
 
-  def flushtransferleft(self, site):
-    """Remove or recalculate transfer vectors to get to correct site
-    Unlike getlefttransfers, assumes any existing/cached are valid"""
-    n = site+1
-    self.logger.info('Flushing left transfer lists to site %d (length %d)',
-      site,n)
-    for itr,tL in enumerate(self.ltransflist):
-      while len(tL) > n:
-        # Longer than needed
-        tL.pop().discard()
-      if n and not len(tL):
-        # Initialize
-        if itr == 0:
-          tL.append(self.H.getboundarytransfleft(self.psi, manager=self))
-        else:
-          i,j = self.collected_pairs()[itr-1]
-          tL.append(LeftTransferManaged(self.psilist[j],0,'l',self.psilist[i],
-            manager=self))
-          tL[-1].compute(None)
-      while len(tL) < n:
-        tL.append(tL[-1].right())
-    self.ntransfL = n
+  def _computeRO(self,key,flip=False):
+    site,direction,*spec = key
+    transf = self._registry[key]
+    if flip and len(spec) == 2:
+      i,j = spec
+      if (site,direction,j,i) in self._activeRO:
+        transf.T = self._registry[site,direction,j,i].T.renamed('t-b,b-t').conj()
+        return
+    if direction == 'r':
+      self.logger.debug('Computing right transfer %d for %s',site,spec) 
+      if site == self.N-1:
+        transf.compute(None)
+      else:
+        assert (site+1,'r')+tuple(spec) in self._activeRO
+        transf.compute(self._registry[(site+1,'r')+tuple(spec)].T)
+    else:
+      self.logger.debug('Computing left transfer %d for %s',site,spec)
+      if site == 0:
+        transf.compute(None)
+      else:
+        assert (site-1,'l')+tuple(spec) in self._activeRO
+        transf.compute(self._registry[(site-1,'l')+tuple(spec)].T)
 
-  def flushtransferright(self, site):
-    n = self.N-site
-    self.logger.info('Flushing right transfer lists to site %d (length %d)',
-      site,n)
-    for itr,tR in enumerate(self.rtransflist):
-      while len(tR) > n:
-        # Longer than needed
-        tR.pop(0).discard()
-      if n and not len(tR):
-        # Initialize
-        if itr == 0:
-          tR.append(self.H.getboundarytransfright(self.psi,manager=self))
-        else:
-          i,j = self.collected_pairs()[itr-1]
-          tR.append(RightTransferManaged(self.psilist[j],self.N-1,'r',
-            self.psilist[i],manager=self))
-          tR[0].compute(None)
-      while len(tR) < n:
-        tR.insert(0,tR[0].left())
-    self.ntransfR = n
+  @property
+  def _nullROstate(self):
+    return np.zeros((self.npsis,self.npsis,2),dtype=int)
 
-  def clearcache(self):
-    for tll in (self.ltransflist,self.rtransflist,self.transfcacheL.values(),self.transfcacheR.values()):
-      for tlist in tll:
-        while len(tlist) > 0:
-          tlist.pop().discard()
+  def _initializeROs(self,statespec=None):
+    for ipsi in range(self.npsis):
+      psi = self.psilist[ipsi]
+      for site in range(self.N-1):
+        self._registry[site,'l',ipsi] = LeftTransferManaged(psi,
+          site,'l', self.H, manager=self)
+      for site in range(1,self.N):
+        self._registry[site,'r',ipsi] = RightTransferManaged(psi,
+          site,'r', self.H, manager=self)
+      for jpsi in range(ipsi):
+        phi = self.psilist[jpsi]
+        for site in range(self.N-1):
+          self._registry[site,'l',jpsi,ipsi] = LeftTransferManaged(psi,
+            site,'l', phi, manager=self)
+          self._registry[site,'l',ipsi,jpsi] = LeftTransferManaged(phi,
+            site,'l', psi, manager=self)
+        for site in range(1,self.N):
+          self._registry[site,'r',jpsi,ipsi] = RightTransferManaged(phi,
+            site,'r', psi, manager=self)
+          self._registry[site,'r',ipsi,jpsi] = RightTransferManaged(phi,
+            site,'r', psi, manager=self)
+    self._ROstatespec = self._nullROstate
+    self._inactiveRO = set(self._registry)
+    self._activeRO = set()
+    if statespec is not None:
+      self._updateROstate(statespec)
+
+  def _validateROstate(self, spec):
+    assert isinstance(spec,np.ndarray)
+    assert spec.dtype == int
+    assert spec.shape == (self.npsis,self.npsis,2)
+    assert np.all(spec >= 0)
+    assert np.all(spec < self.N)
+
+  def _validateRO(self, key):
+    site,lr,*idx = key
+    transf = self._registry[key]
+    if lr == 'l':
+      if not isinstance(transf, LeftTransferManaged):
+        return False
+    else:
+      assert lr == 'r'
+      if not isinstance(transf, RightTransferManaged):
+        return False
+    if site != transf.site:
+      return False
+    if len(idx) == 1:
+      return transf.depth == 1 and transf.operators[0] == self.H and transf._psi2 is None and transf.psi is self.psilist[idx[0]]
+    else:
+      i,j = idx
+      return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
+        transf.psi is self.psilist[j]
+
+  def ROstatelist(self, statespec):
+    states = []
+    for i in range(self.npsis):
+      for j in range(self.npsis):
+        if i == j:
+          states.extend((n,'l',i) for n in range(statespec[i,i,0]))
+          states.extend((self.N-n-1,'r',i) for n in range(statespec[i,i,1]))
+        else:
+          states.extend((n,'l',i,j) for n in range(statespec[i,j,0]))
+          states.extend((self.N-n-1,'r',i,j) for n in range(statespec[i,j,1]))
+    return states
+  
+  def shiftleftupto(self, site):
+    statespec = self._ROstatespec.copy()
+    statespec[self.psiindex,:,0] = site
+    self._updateROstate(statespec)
+    if site:
+      return self.fetchRO((site-1,'l',self.psiindex))
+
+  def shiftrightupto(self, site):
+    statespec = self._ROstatespec.copy()
+    statespec[self.psiindex,:,1] = self.N-site-1
+    self._updateROstate(statespec)
+    if site != self.N-1:
+      return self.fetchRO((site+1,'r',self.psiindex))
           
   def selectpsi(self, index, flush_to, log=True):
     if log:
       self.logger.info('Selecting state #%d',index)
-    if index == self.psiindex:
-      if flush_to is not None:
-        # Check that correct transfers are there
-        fleft,fright = flush_to
-        self.flushtransferleft(fleft)
-        self.flushtransferright(fright)
-      return self.npsis
-    self.transfcacheL[self.psiindex] = self.transfLs
-    self.transfcacheR[self.psiindex] = self.transfRs
-    if index in self.transfcacheL:
-      self.transfLs = self.transfcacheL.pop(index)
-    else:
-      self.transfLs = []
-    if index in self.transfcacheR:
-      self.transfRs = self.transfcacheR.pop(index)
-    else:
-      self.transfRs = []
+    self.psiindex = index
+    statespec = self._ROstatespec.copy()
+    for j in range(self.npsis):
+      if j != index:
+        statespec[index,j,0] = max(statespec[j,index,0],statespec[index,j,0])
+        statespec[index,j,1] = max(statespec[j,index,1],statespec[index,j,1])
+        statespec[j,index,:] = 0
+    self._updateROstate(statespec,flip=True)
     if flush_to is not None:
       fleft,fright = flush_to
-    else:
-      fleft = len(self.transfLs)-1
-      fright = self.N-len(self.transfRs)
-    dottL = self.dottransferL
-    dottR = self.dottransferR
-    self.dottransferL = {}
-    self.dottransferR = {}
-    self.psiindex = index
-    for i,j in self.collected_pairs():
-      # check: already in `active' transfer list?
-      tLs = []
-      c = False
-      if (i,j) in dottL:
-        tLs = dottL.pop((i,j))
-      elif (j,i) in dottL:
-        tLs = dottL.pop((j,i))
-        c = True
-      elif (i,j) in self.transfcacheL:
-        tLs = self.transfcacheL.pop((i,j))
-      elif (j,i) in self.transfcacheR:
-        tLs = self.transfcacheL.pop((j,i))
-        c = True
-      if c:
-        for n in range(len(tLs)):
-          T = tLs[n]
-          tLs[n] = T.conj()
-          T.discard()
-      self.dottransferL[i,j] = tLs
-      tRs = []
-      c = False
-      if (i,j) in dottR:
-        tLs = dottR.pop((i,j))
-      elif (j,i) in dottR:
-        tRs = dottR.pop((j,i))
-        c = True
-      elif (i,j) in self.transfcacheR:
-        tRs = self.transfcacheR.pop((i,j))
-      elif (j,i) in self.transfcacheR:
-        tRs = self.transfcacheR.pop((j,i))
-        c = True
-      if c:
-        for n in range(len(tRs)):
-          T = tRs[n]
-          tRs[n] = T.conj()
-          T.discard()
-      self.dottransferR[i,j] = tRs
-    self.flushtransferleft(fleft)
-    self.flushtransferright(fright)
-    self.transfcacheL.update(dottL)
-    self.transfcacheR.update(dottR)
+
+      self.shiftleftupto(fleft+1)
+      self.shiftrightupto(fright-1)
     return self.npsis
 
   # TODO initialization for next states
@@ -1545,7 +1652,9 @@ class DMRGOrthoManager(DMRGManager):
     self.logger.info('Initializing state #%d with double update at site %d',
       self.npsis,site)
     self.npsis += 1 
-    self.psilist.append(copy(self.psilist[-1]))
+    psi = copy(self.psilist[-1])
+    idx = self.npsis-1
+    self.psilist.append(psi)
     Einit = self.Es[-1]
     if Einit is None:
       Einit = self.E0s[-1]
@@ -1553,9 +1662,24 @@ class DMRGOrthoManager(DMRGManager):
     self.E0s.append(None)
     self.s0s.append(None)
     self.dschmidts.append(0)
+    # New transfer vector containers
+    newtransf = {}
+    newtransf.update({(site,'l',idx):LeftTransferManaged(psi,site,'l',self.H,
+      manager=self) for site in range(self.N-1)})
+    newtransf.update({(site,'r',idx):RightTransferManaged(psi,site,'r',self.H,
+      manager=self) for site in range(1,self.N)})
+    for j in range(self.npsis):
+      phi = self.psilist[j]
+      newtransf.update({(site,'l',idx,j):LeftTransferManaged(phi,site,'l',psi,
+        manager=self) for site in range(self.N-1)})
+      newtransf.update({(site,'r',idx,j):RightTransferManaged(phi,site,'r',psi,
+        manager=self) for site in range(1,self.N)})
+      newtransf.update({(site,'l',j,idx):LeftTransferManaged(psi,site,'l',phi,
+        manager=self) for site in range(self.N-1)})
+      newtransf.update({(site,'r',j,idx):RightTransferManaged(psi,site,'r',phi,
+        manager=self) for site in range(1,self.N)})
+    self.expandROs(newtransf, np.pad(self._ROstatespec,[(0,1),(0,1),(0,0)]))
     self.selectpsi(self.npsis-1,(site-1,site+2))
-    #self.getrighttransfers(site+2)
-    #self.getlefttransfers(site-1)
     ug,self.settings['useguess'] = self.settings['useguess'],False
     self.doubleupdate(site,'r')
     self.settings['useguess'] = True
@@ -1571,233 +1695,36 @@ class DMRGOrthoManager(DMRGManager):
   def getrighttransfers(self, n0):
     self.logger.log(20, 'Collecting right transfer matrices (to site %d)',n0)
     #TODO be more deliberate about when clearing database
-    for n in range(self.ntransfR):
-      self.transfRs[n].discard()
-      for idx in self.dottransferR:
-        self.dottransferR[idx][n].discard()
-    for n in range(self.ntransfL):
-      self.transfLs[n].discard()
-      for idx in self.dottransferL:
-        self.dottransferL[idx][n].discard()
-    #self.database.clear()
-    self.transfRs = self.H.right_transfer(self.psi, n0, collect=True, manager=self)
-    self.transfLs = []
-    self.ntransfR = len(self.transfRs)
-    self.ntransfL = 0
-    self.dottransferL = {}
-    self.dottransferR = {}
-    # TODO callable for options for which transfers to track
-    #for i in range(self.psiindex):
-    for i,j in self.collected_pairs():
-      self.dottransferL[i,j] = []
-      phi,psi = self.psilist[i],self.psilist[j]
-      tR = RightTransferManaged(psi, self.N-1, 'r', phi, manager=self)
-      tR.compute(None)
-      self.dottransferR[i,j] = tR.moveby(self.N-1-n0,collect=True)[::-1]
+    self.shiftleftupto(0)
+    self.shiftrightupto(self.N-1)
+    self.shiftrightupto(n0)
 
   def getlefttransfers(self, n0):
     # Only clear left here
-    for n in range(self.ntransfL):
-      self.transfLs[n].discard()
-      for idx in self.dottransferL:
-        self.dottransferL[idx][n].discard()
-    self.logger.log(20, 'Collecting left transfer matrices (to site %d)',n0)
-    self.transfLs = self.H.left_transfer(self.psi, n0, collect=True, manager=self)
-    self.ntransfL = len(self.transfLs)
-    self.dottransferL = {}
-    # TODO callable for options for which transfers to track
-    #for i in range(self.psiindex):
-    for i,j in self.collected_pairs():
-      phi,psi = self.psilist[i],self.psilist[j]
-      tL = LeftTransferManaged(psi, 0, 'l', phi, manager=self)
-      tL.compute(None)
-      self.dottransferL[i,j] = tL.moveby(n0-1,collect=True)
+    self.shiftleftupto(0)
+    self.shiftleftupto(n0)
 
-  def regenerate(self):
-    if self.ntransfR:
-      # Start with boundary 
-      self.transfRs[-1].compute(None)
-      for nr in range(self.ntransfR-2,-1,-1):
-        self.transfRs[nr].compute(self.transfRs[nr+1].T)
-      for dotR in self.dottransferR.values():
-        dotR[-1].compute(None)
-        for nr in range(self.ntransfR-2,-1,-1):
-          dotR[nr].compute(dotR[nr+1].T)
-    if self.ntransfL:
-      self.transfLs[0].compute(None)
-      for nl in range(1,self.ntransfL):
-        self.transfLs[nl].compute(self.transfLs[nl-1].T)
-      for dotL in self.dottransferL.values():
-        dotL[0].compute(None)
-        for nl in range(1,self.ntransfL):
-          dotL[nl].compute(dotR[nl-1].T)
+  #@property
+  #def rtransflist(self):
+  #  return [self.transfRs]+[self.dottransferR[idx] for idx in self.collected_pairs()]
 
-  def checkdatabase(self):
-    self.logger.debug('Checking database and restoring entries as necessary')
-    if self.dbpath:
-      if not self.database:
-        self.database = PseudoShelf(self.dbpath)
-      keys = self.database.checkentries()
-    else:
-      keys = set(self.database)
-    if self.ntransfR:
-      for idx,tR in enumerate(self.rtransflist):
-        if idx == 0:
-          state = 'H'
-        else:
-          state = idx-1
-        if tR[-1].id.hex not in keys:
-          self.logger.warn('Right boundary transfer vector (%s) missing; restoring',state)
-          tR[-1].compute(None)
-        for n in range(1,self.ntransfR):
-          if tR[-n-1].id.hex not in keys:
-            if idx == self.psiindex:
-              self.logger.warn('Right transfer vector at %s (%s) missing; '
-                'restoring', self.N-n-1, state)
-            tR[-n-1].compute(tR[-n].T)
-        assert len(tR) == self.ntransfR
-    if self.ntransfL:
-      for idx,tL in enumerate(self.ltransflist):
-        if idx == 0:
-          state = 'H'
-        else:
-          state = idx-1
-        if tL[0].id.hex not in keys:
-          self.logger.warn('Left boundary transfer vector (%s) missing; restoring',state)
-          tL[0].compute(None)
-        for n in range(1,self.ntransfL):
-          if tL[n].id.hex not in keys:
-            self.logger.warn('Left transfer vector at %s (%s) missing; '
-              'restoring',n,state)
-          tL[n].compute(tL[n-1].T)
-        assert len(tL) == self.ntransfL
-    valid_keys = {t.id.hex for tlist in (self.rtransflist+self.ltransflist) for t in tlist}
-    for k,tL in self.transfcacheL.items():
-      n = 0
-      while n < len(tL) and tL[n].id.hex in keys:
-        valid_keys.add(tL[n].id.hex)
-        n += 1
-      # Delete additional
-      if n < len(tL):
-        self.logger.info('Cached left transfer chain %s broken at %d of %d,'
-          'deleting remainder',k,n,len(tL))
-        while len(tL) > n:
-          T = tL.pop()
-          if T.id.hex in keys:
-            del self.database[T.id.hex]
-    for k,tR in self.transfcacheR.items():
-      nt = len(tR)
-      n = nt-1
-      while n >= 0 and tR[n].id.hex in keys:
-        valid_keys.add(tR[n].id.hex)
-        n -= 1
-      # Delete additional
-      if n >= 0:
-        self.logger.info('Cached right transfer chain %s broken at %d of %d,'
-          'deleting remainder',k,n,nt)
-        while len(tR)+n >= nt:
-          T = tR.pop(0)
-          if T.id.hex in keys:
-            del self.database[T.id.hex]
-    for k in keys - valid_keys:
-      self.logger.info('Removing unidentified key %s',k)
-      del self.database[k]
-    self.logger.log(8,'%d valid keys (%d), %d left transfers, %d right transfers, state #%d',len(valid_keys),len(self.database),self.ntransfL,self.ntransfR,self.psiindex)
-    assert len(self.database) == (self.npsis)*(self.ntransfL + self.ntransfR) + sum(len(tL) for tL in self.transfcacheL.values()) + sum(len(tR) for tR in self.transfcacheR.values())
-    # TODO change to match collection setting
-
-  @property
-  def rtransflist(self):
-    return [self.transfRs]+[self.dottransferR[idx] for idx in self.collected_pairs()]
-
-  @property
-  def ltransflist(self):
-    return [self.transfLs]+[self.dottransferL[idx] for idx in self.collected_pairs()]
+  #@property
+  #def ltransflist(self):
+  #  return [self.transfLs]+[self.dottransferL[idx] for idx in self.collected_pairs()]
 
   def gettransfR(self, n, which=None):
     """Transfer matrix at site n; Hamiltonian if which is None,
     identified pair otherwise"""
-    # TODO combine options with proxy context manager?
-    self.logger.debug('Fetching site %d right transfers (%s) (of %d presently)',n,which,self.ntransfR)
-    if n == self.N-self.ntransfR-1:
-      # Compute transfer
-      self.logger.log(15,'Computing site %d right transfers',n)
-      if self.ntransfR == 0:
-        tR = self.H.getboundarytransfright(self.psi, manager=self)
-        self.transfRs = [tR]
-        #yield tR
-        for i,j in self.collected_pairs():
-          tR = RightTransferManaged(self.psilist[j],self.N-1,'r',
-            self.psilist[i], manager=self)
-          tR.compute(None)
-          self.dottransferR[i,j] = [tR]
-          #yield tR
-      else:
-        for tlist in self.rtransflist:
-          tR = tlist[0].left()
-          #yield tR
-          tlist.insert(0,tR)
-      self.ntransfR += 1
-      #return
-    nm = n-(self.N-self.ntransfR)
-    assert nm >= 0
     if which is None:
-      return self.transfRs[nm]
+      return self.fetchRO((n,'r',self.psiindex))
     else:
-      return self.dottransferR[which][nm]
+      return self.fetchRO((n,'r')+which)
 
   def gettransfL(self, n, which=None):
-    self.logger.debug('Fetching site %d left transfers (%s) (of %d presently)',n,which,self.ntransfL)
-    if n == self.ntransfL:
-      self.logger.log(15, 'Computing site %d left transfers',n)
-      # Compute transfer
-      if self.ntransfL == 0:
-        tL = self.H.getboundarytransfleft(self.psi, manager=self)
-        self.transfLs = [tL]
-        #yield tL
-        for i,j in self.collected_pairs():
-          tL = LeftTransferManaged(self.psilist[j],0,'l',self.psilist[i],
-            manager=self)
-          tL.compute(None)
-          self.dottransferL[i,j] = [tL]
-        # yield tL
-      else:
-        for tlist in self.ltransflist:
-          tL = tlist[-1].right()
-          tlist.append(tL)
-        #tL = self.transfLs[-1].right()
-        #self.transfLs.append(tL)
-      self.ntransfL += 1
-      #eturn
-    assert n <= self.ntransfL
     if which is None:
-      return self.transfLs[n]
+      return self.fetchRO((n,'l',self.psiindex))
     else:
-      return self.dottransferL[which][n]
-
-  def discardleft(self):
-    # Discard (rightmost) left transfer matrix
-    self.logger.info('Discarding left transfer matrix (%d)',self.ntransfL-1)
-    for tlist in self.ltransflist:
-      tlist.pop().discard()
-    self.ntransfL -= 1
-
-  def discardright(self):
-    # Discard (leftmost) right transfer matrix
-    self.logger.info('Discarding right transfer matrix (%d)',self.N-self.ntransfR)
-    for tlist in self.rtransflist:
-      tlist.pop(0).discard()
-    self.ntransfR -= 1
-
-  def compare1(self, niter):
-    # TODO energy comparison: individual or all together?
-    if niter == 0:
-      config.streamlog.log(30, 'Single update')
-    self.getE()
-    Ediff = self.E-self.E0
-    self.logger.log(20, '[%s]  energy diff %s', niter, Ediff)
-    config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10f',niter,Ediff,self.E)
-    return abs(Ediff)
+      return self.fetchRO((n,'l')+which)
 
   def ortho_vectors(self, site, nsites):
     right = site+nsites == self.N
@@ -1813,16 +1740,16 @@ class DMRGOrthoManager(DMRGManager):
       if nsites == 2:
         Tr = phi.getTR(site+1)
         T0 = T0.contract(Tr,'r-l;b>bl,~;b>br,~')
-      T = T0.conj()
+      T = T0#.conj()
       if not left:
         L = self.gettransfL(site-1,(i,j))
-        self.logger.debug('left at %d',L.site)
-        T = T.contract(L.T, 'l-t;~;b>l*')
+        self.logger.log(5,'left at %d',L.site)
+        T = T.contract(L.T, 'l-t;~;b>l')#*')
       if not right:
         R = self.gettransfR(site+nsites,(i,j))
-        self.logger.debug('right at %d',R.site)
-        T = T.contract(R.T,'r-t;~;b>r*')
-      yield T.conj()
+        self.logger.log(5,'right at %d',R.site)
+        T = T.contract(R.T,'r-t;~;b>r')#*')
+      yield T#.conj()
       
   def optimize_tensor(self, Heff, site, nsites, gauge=None, charge=None):
     # Project out vectors
@@ -1855,7 +1782,9 @@ class DMRGOrthoManager(DMRGManager):
     return v[np.argmin(w)]
     
   def doubleupdateleft(self):
-    # TODO better way of handling transfer
+    # TODO combine left/right/bulk?
+    self.shiftleftupto(0)
+    self.shiftrightupto(1)
     tR = self.gettransfR(2)
     self.logger.log(12, 'left edge double update')
     Heff = operators.NetworkOperator('(T);Ol;Or;R;R.t-T.r,Ol.r-Or.l,'
@@ -1867,10 +1796,10 @@ class DMRGOrthoManager(DMRGManager):
     self.psi.setTL(ML.renamed('bl-b'),0,unitary=True)
     self.psi.setTR(MR.renamed('br-b'),1,unitary=True)
     self.psi.setschmidt(s/np.linalg.norm(s),0)
-    self.discardright()
 
   def doubleupdateright(self):
-    # TODO better way of handling transfer
+    self.shiftleftupto(self.N-2)
+    self.shiftrightupto(self.N-1)
     tL = self.gettransfL(self.N-3)
     self.logger.log(12, 'right edge double update')
     Heff = operators.NetworkOperator('L;(T);Ol;Or;L.t-T.l,L.c-Ol.l,'
@@ -1882,16 +1811,11 @@ class DMRGOrthoManager(DMRGManager):
     self.psi.setTL(ML.renamed('bl-b'),self.N-2,unitary=True)
     self.psi.setTR(MR.renamed('br-b'),self.N-1,unitary=True)
     self.psi.setschmidt(s/np.linalg.norm(s), self.N-2)
-    self.discardleft()
 
   def doubleupdate(self, n, direction):
     self.logger.log(15, 'site %s double update (%s)', n, direction)
-    if direction == 'r':
-      while n+2 > self.N-self.ntransfR:
-        self.discardright()
-    else:
-      while n < self.ntransfL:
-        self.discardleft()
+    self.shiftleftupto(n)
+    self.shiftrightupto(n+1)
     tR = self.gettransfR(n+2)
     tL = self.gettransfL(n-1)
     Heff = operators.NetworkOperator('L;(T);Ol;Or;R;L.t-T.l,R.t-T.r,'
@@ -1912,12 +1836,10 @@ class DMRGOrthoManager(DMRGManager):
     self.psi.setTL(ML.renamed('bl-b'),n,unitary=True)
     self.psi.setTR(MR.renamed('br-b'),n+1,unitary=True)
     self.psi.setschmidt(s/np.linalg.norm(s), n)
-    if direction == 'r':
-      self.discardright()
-    else:
-      self.discardleft()
 
   def singleupdateleft(self):
+    self.shiftleftupto(0)
+    self.shiftrightupto(0)
     tR = self.gettransfR(1)
     self.logger.log(10, 'left edge single update')
     Heff = operators.NetworkOperator('(T);O;R;R.t-T.r,O.r-R.c,O.t-T.b;'
@@ -1927,11 +1849,11 @@ class DMRGOrthoManager(DMRGManager):
     self.psi.setTL(ML,0,unitary=True)
     schmidt = s/np.linalg.norm(s)
     self.psi.setschmidt(schmidt,0)
-    self.discardright()
-    #return MR.diag_mult('l', schmidt)
     return MR
 
   def singleupdateright(self, gauge):
+    self.shiftleftupto(self.N-1)
+    self.shiftrightupto(self.N-1)
     tL = self.gettransfL(self.N-2)
     self.logger.log(10, 'right edge single update')
     Heff = operators.NetworkOperator('(T);O;L;L.t-T.l,O.l-L.c,O.t-T.b;'
@@ -1941,11 +1863,12 @@ class DMRGOrthoManager(DMRGManager):
     self.psi.setTR(MR,self.N-1,unitary=True)
     schmidt = s/np.linalg.norm(s)
     self.psi.setschmidt(schmidt,self.N-2)
-    self.discardleft()
     return ML
 
   def singleupdate(self, n, direction, gauge):
     self.logger.log(12, 'site %s single update (%s)', n, direction)
+    self.shiftleftupto(n)
+    self.shiftrightupto(n)
     right = direction == 'r'
     if right:
       while n+1 > self.N-self.ntransfR:
@@ -1966,13 +1889,11 @@ class DMRGOrthoManager(DMRGManager):
       ML,s,MR = M.svd('l,b|r,l|r',tolerance=self.settings['tol1'])
       self.psi.setTL(ML,n,unitary=True)
       self.psi.setschmidt(s/np.linalg.norm(s),n)
-      self.discardright()
       return MR
     else:
       MR,s,ML = M.svd('r,b|l,r|l',tolerance=self.settings['tol1'])
       self.psi.setTR(MR,n,unitary=True)
       self.psi.setschmidt(s/np.linalg.norm(s),n-1)
-      self.discardleft()
       return ML
 
   def returnvalue(self):
