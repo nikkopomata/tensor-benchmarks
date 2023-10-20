@@ -724,6 +724,10 @@ class DMRGManager:
       if hasattr(V,'full_iter'):
         # Dictionary by charge sector
         l1 = {k:ll[idx:idx+d*degen:d] for k,degen,d,idx in V.full_iter()}
+        # Flip 'secondary' quaternionic irreps as necessary
+        for k,nn in V:
+          if V.group.indicate(k) == -2:
+            l1[V.group.dual(k)] = l1.pop(k)
       else:
         l1 = copy(ll)
       # Update history
@@ -1315,7 +1319,7 @@ class DMRGOrthoManager(DMRGManager):
     """Save output after completing bond-dimension optimization"""
     self.logger.log(20,'Saving states with bond dimension %d',self.chi)
     for i in range(self.npsis):
-      pickle.dump((self.psilist[i],self.Es[i]),open(f'{self.saveprefix}c{self.chi}n{self.psiindex}.p','wb'))
+      pickle.dump((self.psilist[i],self.Es[i]),open(f'{self.saveprefix}c{self.chi}n{i}.p','wb'))
 
   def check_add_state(self, niter, delta):
     if self.npsis == 1 and delta is None:
@@ -1463,7 +1467,7 @@ class DMRGOrthoManager(DMRGManager):
   def benchmark1(self):
     # Get energy for current state
     self.getE(savelast=False,updaterel=False)
-    config.streamlog.log(20, f'\t#%d %+12.4g E=%0.10f',self.psiindex,self.E-self.E0,self.E)
+    config.streamlog.log(20, f'\t#%d %#-+12.4g E=%-0.10f',self.psiindex,self.E-self.E0,self.E)
 
   def benchmark2(self):
     # Get energy & schmidt-difference for current state
@@ -1474,8 +1478,12 @@ class DMRGOrthoManager(DMRGManager):
       l1 = self.psi._schmidt[n]
       if isinstance(l0, dict):
         # Dictionary by charge sector
-        viter = self.psi.getbond(n).full_iter()
-        l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+        V = self.psi.getbond(n)
+        l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in V.full_iter()}
+        # Flip 'secondary' quaternionic irreps as necessary
+        for k,nn in V:
+          if V.group.indicate(k) == -2:
+            l1[V.group.dual(k)] = l1.pop(k)
         for k in set(l1).intersection(set(l0)):
           Ldiff += adiff(l0[k],l1[k])
         for k in set(l1) - set(l0):
@@ -1492,12 +1500,12 @@ class DMRGOrthoManager(DMRGManager):
     self.logger.log(15, '[#%d] schmidt diff %s', self.psiindex, Ldiff)
     self.getE(savelast=False,updaterel=False)
     self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
-    config.streamlog.log(25,f'\t#%d %#10.4g %#+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
+    config.streamlog.log(25,f'\t#%d %#-10.4g %#-+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
 
   def compare1(self, niter, which='all'):
     assert which == 'all'
     dEtot = np.mean([abs(self.Es[i]-self.E0s[i]) for i in range(self.npsis)])
-    self.streamlog.log(30,f'[% 3d] %#12.4g',niter,dEtot)
+    self.streamlog.log(30,f'[% 3d] %#-12.4g',niter,dEtot)
     return dEtot
 
   def compare2(self, niter, which='all'):
@@ -1517,7 +1525,7 @@ class DMRGOrthoManager(DMRGManager):
         
     dEtot = np.sum(self.Es)-np.sum(self.E0s)
     Ldtot = np.mean(self.dschmidts)
-    config.streamlog.log(30,f'[% 3d] %#12.4g %#12.4g : %#+12.4g',niter,Ldtot,dEavg,dEtot)
+    config.streamlog.log(30,f'[% 3d] %#-12.4g %#-12.4g : %#-+12.4g (%#0.10f)',niter,Ldtot,dEavg,dEtot,np.mean(self.Es))
     if self.settings['eigtol_rel']:
       self.eigtol = self.settings['eigtol_rel']*dEavg
       self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
@@ -2175,6 +2183,7 @@ def singleOrthoSupervisor(N, npsis, settings, state=None):
   if state is None:
     psi0 = 0
     i0 = 0
+    resume = False
     yield 'righttransf', (1,)
     yield 'saveschmidt', ()
     npsis = yield 'select', (psi0,(-1,1))
