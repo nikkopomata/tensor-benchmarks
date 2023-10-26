@@ -387,7 +387,7 @@ class DMRGManager:
   def expandROs(self, extension, statespec):
     """Expand registered objects with dictionary of new *inactive* objects
     & new specifier
-    Assume internal changes have to expand permissible registry have already
+    Assume internal changes required to expand permissible registry have already
     been performed"""
     assert isinstance(extension,dict) and not (set(extension) & set(self._registry))
     assert set(self.ROstatelist(statespec)) == self._activeRO
@@ -476,7 +476,7 @@ class DMRGManager:
         transf.compute(None)
       else:
         site0 = site + (1 if lr == 'r' else -1)
-        transf.compute(self._registry[(site0,lr)+arg].T)
+        transf.compute(self._registry[(site0,lr)+tuple(arg)].T)
     return {transf.id.hex}
 
   def ROstatelist(self, statespec):
@@ -731,14 +731,14 @@ class DMRGManager:
       dbkeys = set(self.database)
     # Check converted: TODO depricate
     for key in self._registry:
-      assert self._validateRO(self, key)
+      assert self._validateRO(key)
     activedbkeys = set()
     for key in self.ROstatelist(self._ROstatespec):
       activedbkeys.update(self._ROcheckdbentries(key))
     for k in dbkeys - activedbkeys:
       self.logger.info('Removing unidentified key %s',k)
       del self.database[k]
-    assert len(self.database) == len(self.activeRO)
+    assert len(self.database) == len(self._activeRO)
     # TODO change for case RO-database is not one-to-one
 
   def setdboff(self, remove=True):
@@ -1177,7 +1177,7 @@ class PseudoShelf(MutableMapping):
 
 def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
     override=True, override_chis=True, resume_from_old=False, use_shelf=False,
-    **dmrg_kw):
+    groundstate=None, **dmrg_kw):
   """Initialize optimization manager
   (unpickle if saved, create otherwise)
   'override' tells manager to replace settings if different in restored manager
@@ -1189,6 +1189,7 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
       'higher' to make the algorithm select the next-highest
   'resume_from_old' indicates that the filename may point to a saved status
     consisting of (psi, (chi, single_or_double, niter))
+  'groundstate' is a state to use as an initial fixed state
   remaining arguments  as in DMRGManager()"""
   if savefile and (savefile != 'auto' or file_prefix):
     # Check existing
@@ -1221,36 +1222,55 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
           Mngr.setdbon()
         else:
           Mngr.setdboff(False)
+      if groundstate is not None:
+        Mngr.supcommands['init'] = Mngr.initstate_from_fixed
       return Mngr
-  return DMRGOrthoManager(Hamiltonian, chis, npsis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
+  if groundstate is not None:
+    Mngr = DMRGOrthoManager(Hamiltonian, chis, npsis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, fixed_states=[groundstate], **dmrg_kw)
+    Mngr.supcommands['init'] = Mngr.initstate_from_fixed
+    return Mngr
+  else:
+    return DMRGOrthoManager(Hamiltonian, chis, npsis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
 
 class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
-  def __init__(self, Hamiltonian, chis, npsis, ortho_tol=1e-7, keig=1,
-      newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,nsweepadd=10,persiteshift=0,
-      **kw_args):
+  def __init__(self, Hamiltonian, chis, npsis, fixed_states=None,
+      ortho_tol=1e-7, keig=1, newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,
+      nsweepadd=10, persiteshift=0, usereflection=False, **kw_args):
     self.psiindex = 0
     self.npsi_tot = npsis
     self.npsis = 1
     self.psilist = [None]
-    self.dottransferR = {}
-    self.dottransferL = {}
-    self.transfcacheL = {}
-    self.transfcacheR = {}
     self.Es = [None]
     self.s0s = [None]
     self.E0s = [None]
     self.dschmidts = [0]
+    # States which are not actively updated
+    # (either fixed or dependent on other states)
+    if fixed_states is not None:
+      self.passive_states = list(fixed_states)
+    else:
+      self.passive_states = []
+    # Map 'active' states to dependent 'passive' states
+    self.passive_dependent = {0:set()}
+    # Inverse of above
+    self.passive_dependency = {j:[] for j in range(self.npassive)}
     super().__init__(Hamiltonian, chis, **kw_args)
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
     self.__version = '1.0'
-    self._ROstatespec = np.zeros((self.npsis,self.npsis),dtype=int)
+    # State specification:
+    # (i,i,<0/1>) -> number of <left/right> Hamiltonian transfers for state i
+    # (i,j,<0/1>) -> number of transfers between states i and j
+    # (i,-1,:) -> dummy for if transfers w/ passive states dependent on i
+    #   are kept
+    self._ROstatespec = np.zeros((self.npsis,self.npsis+1,2),dtype=int)
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
-      nsweepadd=nsweepadd,useguess=True)
+      nsweepadd=nsweepadd,usereflection=usereflection,useguess=True)
+    self.settings.update(self.settings_allchi)
 
   def __setstate__(self, state):
     super().__setstate__(state)
@@ -1308,7 +1328,7 @@ class DMRGOrthoManager(DMRGManager):
       ntL,ntR = self._ROstatespec
       active,reg = self._activeRO,self._registry
 
-      self._ROstatespec = np.zeros((self.npsis,self.npsis,2),dtype=int)
+      self._ROstatespec = np.zeros((self.npsis,self.npsis+1,2),dtype=int)
       self._activeRO = set()
       self._inactiveRO = set()
       self._registry = {}
@@ -1321,6 +1341,8 @@ class DMRGOrthoManager(DMRGManager):
         else:
           self._inactiveRO.add(key)
       self._ROstatespec[ipsi,ipsi,:] = ntL,ntR
+      self._ROstatespec[:,-1,:] = 1
+      self._ROstatespec[self.psiindex,-1,:] = 0
 
       for i,j in self.dottransfR:
         assert len(self.dottransfR[i,j]) == ntR
@@ -1379,6 +1401,10 @@ class DMRGOrthoManager(DMRGManager):
       delattr(self, 'dottransfL')
       delattr(self, 'transfcacheL')
       delattr(self, 'transfcacheR')
+      self.passive_states = []
+      self.passive_dependent = {i:set() for i in range(self.npsis)}
+      self.passive_dependency = {j:[] for j in range(self.npassive)}
+      self.settings['usereflection'] = False
       self.__version = '1.0'
 
   @property
@@ -1388,6 +1414,10 @@ class DMRGOrthoManager(DMRGManager):
   @property
   def nrighttransf(self):
     return self._ROstatespec[self.psiindex,self.psiindex,1]
+
+  @property
+  def npassive(self):
+    return len(self.passive_states)
 
   @property
   def psi(self):
@@ -1476,11 +1506,12 @@ class DMRGOrthoManager(DMRGManager):
 
   @property
   def _nullROstate(self):
-    return np.zeros((self.npsis,self.npsis,2),dtype=int)
+    return np.zeros((self.npsis,self.npsis+1,2),dtype=int)
 
   def _initializeROs(self,statespec=None):
     for ipsi in range(self.npsis):
       psi = self.psilist[ipsi]
+      # Hamiltonian expectation
       for site in range(self.N-1):
         self._registry[site,'l',ipsi] = LeftTransferManaged(psi,
           site,'l', self.H, manager=self)
@@ -1488,6 +1519,7 @@ class DMRGOrthoManager(DMRGManager):
         self._registry[site,'r',ipsi] = RightTransferManaged(psi,
           site,'r', self.H, manager=self)
       for jpsi in range(ipsi):
+        # Inner product with other states
         phi = self.psilist[jpsi]
         for site in range(self.N-1):
           self._registry[site,'l',jpsi,ipsi] = LeftTransferManaged(psi,
@@ -1499,6 +1531,16 @@ class DMRGOrthoManager(DMRGManager):
             site,'r', psi, manager=self)
           self._registry[site,'r',ipsi,jpsi] = RightTransferManaged(phi,
             site,'r', psi, manager=self)
+      for jpass,phi in enumerate(self.passive_states):
+        # Inner product with 'passive' states
+        if jpass in self.passive_dependent[ipsi]:
+          continue
+        for site in range(self.N-1):
+          self._registry[site,'l',ipsi,'p',jpass] = LeftTransferManaged(phi,
+            site,'l',psi,manager=self)
+        for site in range(1,self.N):
+          self._registry[site,'r',ipsi,'p',jpass] = RightTransferManaged(phi,
+            site,'r',psi,manager=self)
     self._ROstatespec = self._nullROstate
     self._inactiveRO = set(self._registry)
     self._activeRO = set()
@@ -1508,9 +1550,11 @@ class DMRGOrthoManager(DMRGManager):
   def _validateROstate(self, spec):
     assert isinstance(spec,np.ndarray)
     assert spec.dtype == int
-    assert spec.shape == (self.npsis,self.npsis,2)
+    assert spec.shape == (self.npsis,self.npsis+1,2)
     assert np.all(spec >= 0)
     assert np.all(spec < self.N)
+    assert np.all(spec[:,-1,0] == spec[:,-1,1])
+    assert np.all(spec[:,-1,:] < 2)
 
   def _validateRO(self, key):
     site,lr,*idx = key
@@ -1526,10 +1570,15 @@ class DMRGOrthoManager(DMRGManager):
       return False
     if len(idx) == 1:
       return transf.depth == 1 and transf.operators[0] == self.H and transf._psi2 is None and transf.psi is self.psilist[idx[0]]
-    else:
+    elif len(idx) == 2:
       i,j = idx
       return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
         transf.psi is self.psilist[j]
+    else:
+      i,s,j = idx
+      assert s == 'p'
+      return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
+        transf.psi is self.passive_states[j]
 
   def ROstatelist(self, statespec):
     states = []
@@ -1541,18 +1590,22 @@ class DMRGOrthoManager(DMRGManager):
         else:
           states.extend((n,'l',i,j) for n in range(statespec[i,j,0]))
           states.extend((self.N-n-1,'r',i,j) for n in range(statespec[i,j,1]))
+      for j in range(len(self.passive_states)):
+        if j not in self.passive_dependent[i] and np.all(statespec[self.passive_dependency[j],-1,0]):
+          states.extend((n,'l',i,'p',j) for n in range(statespec[i,i,0]))
+          states.extend((self.N-n-1,'r',i,'p',j) for n in range(statespec[i,i,1]))
     return states
   
   def shiftleftupto(self, site):
     statespec = self._ROstatespec.copy()
-    statespec[self.psiindex,:,0] = site
+    statespec[self.psiindex,:-1,0] = site
     self._updateROstate(statespec)
     if site:
       return self.fetchRO((site-1,'l',self.psiindex))
 
   def shiftrightupto(self, site):
     statespec = self._ROstatespec.copy()
-    statespec[self.psiindex,:,1] = self.N-site-1
+    statespec[self.psiindex,:-1,1] = self.N-site-1
     self._updateROstate(statespec)
     if site != self.N-1:
       return self.fetchRO((site+1,'r',self.psiindex))
@@ -1560,13 +1613,16 @@ class DMRGOrthoManager(DMRGManager):
   def selectpsi(self, index, flush_to, log=True):
     if log:
       self.logger.info('Selecting state #%d',index)
-    self.psiindex = index
+    self.psiindex,oldindex = index,self.psiindex
     statespec = self._ROstatespec.copy()
     for j in range(self.npsis):
       if j != index:
         statespec[index,j,0] = max(statespec[j,index,0],statespec[index,j,0])
         statespec[index,j,1] = max(statespec[j,index,1],statespec[index,j,1])
         statespec[j,index,:] = 0
+    # Collect dependent passive states for old index, delete for new
+    statespec[oldindex,-1,:] = 1
+    statespec[index,-1,:] = 0
     self._updateROstate(statespec,flip=True)
     if flush_to is not None:
       fleft,fright = flush_to
@@ -1653,6 +1709,27 @@ class DMRGOrthoManager(DMRGManager):
       self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
     return Ldtot
 
+  def initstate_from_fixed(self):
+    # Initialize first state with 'ground state' at passive_states[0]
+    site = self.N//2-1
+    self.logger.info('Initializing first state from fixed with double update at site %d',site)
+    psi = copy(self.passive_states[0])
+    self.psilist[0] = psi
+    self._initializeROs()
+    self.settings['useguess'] = False
+    self.eigtol = self.settings['eigtol']
+    self.doubleupdate(site,'r')
+    self.settings['useguess'] = True
+    self.logger.info('Completing by imposing canonical form')
+    self.shiftleftupto(0)
+    self.shiftrightupto(self.N-1)
+    self.restorecanonical()
+    self.shiftrightupto(2)
+    self.getE()
+    if self.settings['usereflection']:
+      self.logger.info('Adding reflected state')
+      self.add_passive_state(MPSReflected(psi),0)
+
   def newstate_center(self):
     # Initialize with previous
     config.streamlog.log(30,'[ Adding state #%d ]', self.npsis)
@@ -1686,19 +1763,52 @@ class DMRGOrthoManager(DMRGManager):
         manager=self) for site in range(self.N-1)})
       newtransf.update({(site,'r',j,idx):RightTransferManaged(psi,site,'r',phi,
         manager=self) for site in range(1,self.N)})
-    self.expandROs(newtransf, np.pad(self._ROstatespec,[(0,1),(0,1),(0,0)]))
+    for j in range(self.npassive):
+      phi = self.passive_states[j]
+      newtransf.update({(site,'l',idx,'p',j):LeftTransferManaged(phi,site,'l',psi,
+        manager=self) for site in range(self.N-1)})
+      newtransf.update({(site,'r',idx,'p',j):RightTransferManaged(phi,site,'r',psi,
+        manager=self) for site in range(1,self.N)})
+    self.passive_dependent[idx] = set()
+    # Add new row & column
+    statespec = np.pad(self._ROstatespec,[(0,1),(0,1),(0,0)])
+    # Flip last two columns
+    statespec[:,[-1,-2],:] = statespec[:,[-2,-1],:]
+    self.expandROs(newtransf, statespec)
     self.selectpsi(self.npsis-1,(site-1,site+2))
     ug,self.settings['useguess'] = self.settings['useguess'],False
     self.doubleupdate(site,'r')
     self.settings['useguess'] = True
     self.logger.info('Completing by imposing canonical form')
     self.restorecanonical()
+    if self.settings['usereflection']:
+      self.logger.info('Adding reflected state')
+      self.add_passive_state(MPSReflected(psi),idx)
     self.getrighttransfers(2)
   
+  def add_passive_state(self, psinew, dependency=None):
+    idx = len(self.passive_states)
+    self.passive_states.append(psinew)
+    # For now assume single dependency
+    # TODO compatibility with expandROs so that this is not necessary
+    assert isinstance(dependency, int) and not self._ROstatespec[dependency,-1,0]
+    self.passive_dependent[dependency].add(idx)
+    self.passive_dependency[idx] = [dependency]
+    newtransf = {}
+    for iphi,phi in enumerate(self.psilist):
+      if iphi != dependency:
+        newtransf.update({(site,'l',iphi,'p',idx):LeftTransferManaged(psinew,site,
+          'l',phi,manager=self) for site in range(self.N-1)})
+        newtransf.update({(site,'r',iphi,'p',idx):RightTransferManaged(psinew,site,
+          'r',phi,manager=self) for site in range(1,self.N)})
+    self.expandROs(newtransf, self._ROstatespec)
+
   def collected_pairs(self):
     # All pairs of states represented in transfer matrices
     # TODO make dependent on callable
-    return [(self.psiindex,i) for i in range(self.npsis) if i != self.psiindex]
+    regular = [(self.psiindex,i) for i in range(self.npsis) if i != self.psiindex]
+    passive = [(self.psiindex,('p',i)) for i in range(self.npassive) if i not in self.passive_dependent[self.psiindex]]
+    return regular+passive
 
   def getrighttransfers(self, n0):
     self.logger.log(20, 'Collecting right transfer matrices (to site %d)',n0)
@@ -1737,11 +1847,17 @@ class DMRGOrthoManager(DMRGManager):
   def ortho_vectors(self, site, nsites):
     right = site+nsites == self.N
     left = site == 0
-    for i,j in self.collected_pairs():
-      phi = self.psilist[j]
+    for i,jdx in self.collected_pairs():
       if i != self.psiindex:
         continue
-      self.logger.debug('protecting orthogonality of %d (current) w/ %d: site(s) %s', i, j, tuple(range(site,site+nsites)))
+      if isinstance(jdx,tuple):
+        assert jdx[0] == 'p'
+        phi = self.passive_states[jdx[1]]
+        self.logger.debug('protecting orthogonality of %d w/ passive %d: site(s) %s', i, jdx[1], tuple(range(site,site+nsites)))
+      else:
+        j,jdx = jdx,(jdx,)
+        phi = self.psilist[j]
+        self.logger.debug('protecting orthogonality of %d (current) w/ %d: site(s) %s', i, j, tuple(range(site,site+nsites)))
       T0 = phi.getTL(site)
       if not (nsites==1 and right):
         T0 = T0.diag_mult('r',phi.getschmidt(site))
@@ -1750,11 +1866,11 @@ class DMRGOrthoManager(DMRGManager):
         T0 = T0.contract(Tr,'r-l;b>bl,~;b>br,~')
       T = T0#.conj()
       if not left:
-        L = self.gettransfL(site-1,(i,j))
+        L = self.gettransfL(site-1,(i,)+jdx)
         self.logger.log(5,'left at %d',L.site)
         T = T.contract(L.T, 'l-t;~;b>l')#*')
       if not right:
-        R = self.gettransfR(site+nsites,(i,j))
+        R = self.gettransfR(site+nsites,(i,)+jdx)
         self.logger.log(5,'right at %d',R.site)
         T = T.contract(R.T,'r-t;~;b>r')#*')
       yield T#.conj()
@@ -1795,9 +1911,9 @@ class DMRGOrthoManager(DMRGManager):
     self.shiftrightupto(1)
     tR = self.gettransfR(2)
     self.logger.log(12, 'left edge double update')
-    Heff = operators.NetworkOperator('(T);Ol;Or;R;R.t-T.r,Ol.r-Or.l,'
+    Heff = operators.NetworkOperator('(T);R;Ol;Or;R.t-T.r,Ol.r-Or.l,'
       'Or.r-R.c,Ol.t-T.bl,Or.t-T.br;R.b>r,Ol.b>bl,Or.b>br',
-      self.H.getT(0),self.H.getT(1),tR.T)
+      tR.T,self.H.getT(0),self.H.getT(1))
     M = self.optimize_tensor(Heff, 0, 2)
     self.logger.debug('Dividing tensors')
     ML,s,MR = M.svd('bl|r,l|br,r',chi=self.chi,tolerance=self.settings['tol2'])
@@ -1850,8 +1966,8 @@ class DMRGOrthoManager(DMRGManager):
     self.shiftrightupto(0)
     tR = self.gettransfR(1)
     self.logger.log(10, 'left edge single update')
-    Heff = operators.NetworkOperator('(T);O;R;R.t-T.r,O.r-R.c,O.t-T.b;'
-      'R.b>r,O.b>b', self.H.getT(0), tR.T)
+    Heff = operators.NetworkOperator('(T);R;O;R.t-T.r,O.r-R.c,O.t-T.b;'
+      'R.b>r,O.b>b', tR.T, self.H.getT(0))
     M = self.optimize_tensor(Heff, 0, 1)
     ML,s,MR = M.svd('b|r,l|r')
     self.psi.setTL(ML,0,unitary=True)
@@ -1864,8 +1980,8 @@ class DMRGOrthoManager(DMRGManager):
     self.shiftrightupto(self.N-1)
     tL = self.gettransfL(self.N-2)
     self.logger.log(10, 'right edge single update')
-    Heff = operators.NetworkOperator('(T);O;L;L.t-T.l,O.l-L.c,O.t-T.b;'
-      'L.b>l,O.b>b', self.H.getT(self.N-1), tL.T)
+    Heff = operators.NetworkOperator('(T);L;O;L.t-T.l,O.l-L.c,O.t-T.b;'
+      'L.b>l,O.b>b', tL.T, self.H.getT(self.N-1))
     M = self.optimize_tensor(Heff, self.N-1,1)
     ML,s,MR = M.svd('l|r,l|b')
     self.psi.setTR(MR,self.N-1,unitary=True)
@@ -1878,12 +1994,6 @@ class DMRGOrthoManager(DMRGManager):
     self.shiftleftupto(n)
     self.shiftrightupto(n)
     right = direction == 'r'
-    if right:
-      while n+1 > self.N-self.ntransfR:
-        self.discardright()
-    else:
-      while n < self.ntransfL:
-        self.discardleft()
     tR = self.gettransfR(n+1)
     tL = self.gettransfL(n-1)
     Heff = operators.NetworkOperator('L;(T);O;R;L.t-T.l,R.t-T.r,'

@@ -605,9 +605,10 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
       return Tensor._do_contract(T2, self, cswitch, out2, out1, False)
     return Tensor._do_contract(self, T2, contracted, out1, out2, conj)
 
-  def renamed(self, idxmap, view=False, strict=False):
+  def renamed(self, idxmap, view=False, strict=False, overcomplete=False):
+    # TODO view implementation
     # For the time being return copy, not view
-    return Tensor.renamed(self, idxmap, False, strict)
+    return Tensor.renamed(self, idxmap, False, strict, overcomplete)
 
   def symmetry_broken(self):
     """Convert to symmetryless Tensor object"""

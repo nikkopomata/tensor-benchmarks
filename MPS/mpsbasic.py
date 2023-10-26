@@ -186,16 +186,28 @@ class MPS(MPSgeneric):
 
   def dot(self, phi):
     assert self.N == phi.N
-    T = self._matrices[0].diag_mult('r',self._schmidt[0])
-    T = T.contract(phi._matrices[0].diag_mult('r',phi._schmidt[0]),
-      'b-b;r>tr;r>br*')
+    T = self.getTR(0)
+    T = T.contract(phi.getTR(0), 'b-b;r>tr;r>br*')
     for n in range(1,self.N-1):
-      T = T.contract(self._matrices[n].diag_mult('r',self._schmidt[n]),
-        'tr-l;br>br;r>tr,b>q')
-      T = T.contract(phi._matrices[n].diag_mult('r',phi._schmidt[n]),
-        'br-l,q-b;~;r>br*')
-    T = T.contract(self._matrices[-1],'tr-l;~;b>q')
-    return T.contract(phi._matrices[-1],'br-l,q-b*')
+      T = T.contract(self.getTR(n), 'tr-l;br>br;r>tr,b>q')
+      T = T.contract(phi.getTR(n), 'br-l,q-b;~;r>br*')
+    T = T.contract(self.getTc(self.N-1),'tr-l;~;b>q')
+    return T.contract(phi.getTc(self.N-1),'br-l,q-b*')
+
+  def transfer_expv(self, *Ops, normalize=False):
+    """Get expectation value of one or more MPO operators
+    (optionally with different state)
+    Ops as in call to TransferMatrix
+    if normalize, divide by norm(s)"""
+    transf = LeftTransfer(self,0,'l',*Ops)
+    transf.compute(None)
+    val = transf.moveby(self.N-2).right(terminal=True)
+    if normalize:
+      nm = self.normsq()
+      if isinstance(Ops[-1],MPS):
+        nm = np.sqrt(nm*Ops[-1].normsq())
+      val /= nm
+    return val
 
   def truncate(self, cutoff_tol, verbose=False):
     # Truncate bonds to specified value of Schmidt coefficients
@@ -812,3 +824,86 @@ class MPSirrep(MPS):
     super().printcanon(compare)
 
 # TODO transfer-matrix-fetching methods
+
+class MPSReflected(MPS):
+  """'View' of MPS with spatial reflection"""
+  def __init__(self, base):
+    self.__base = base
+    self._Nsites = base._Nsites
+
+  def iscanon(self):
+    return self.__base.iscanon()
+
+  def issite(self,n):
+    return self.__base.issite(n)
+
+  @property
+  def _leftcanon(self):
+    return self.__base._rightcanon[::-1]
+
+  @property
+  def _rightcanon(self):
+    return self.__base._leftcanon[::-1]
+
+  def getTc(self, n):
+    T = self.__base.getTc(self.N-n-1)
+    return T.renamed({'l':'r','r':'l'},overcomplete=True)
+
+  def getTL(self, n):
+    T = self.__base.getTR(self.N-n-1)
+    return T.renamed({'l':'r','r':'l'},overcomplete=True)
+
+  def getTR(self, n):
+    T = self.__base.getTL(self.N-n-1)
+    return T.renamed({'l':'r','r':'l'},overcomplete=True)
+
+  def getschmidt(self, n):
+    return self.__base._schmidt[self.N-n-2]
+
+  def setTL(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  def setTR(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  def restore_canonical(self, **kw_args):
+    raise NotImplementedError()
+
+  def __copy__(self):
+    # TODO distinguish between copy of view & copy of state
+    matrices = [self.getTc(n) for n in range(self.N)]
+    schmidts = self.__base._schmidt[::-1]
+    if isinstance(self.__base,MPSirrep):
+      return MPSirrep(matrices, self.__base._irrep, self.charge_site,
+        schmidts)
+    else:
+      return MPS(matrices, schmidts)
+    #return MPSReflected(self.__base)
+
+  def charged_at(self, n):
+    return self.__base.charged_at(self.N-n-1)
+
+  def lgauge(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  def rgauge(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  def regauge_left(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  def regauge_right(self, *args, **kw_args):
+    raise NotImplementedError()
+
+  # Methods for reflected rep MPS
+  @property
+  def irrep(self):
+    return self.__base._irrep
+
+  @property
+  def charge_site(self):
+    return self.N-self.__base._site-1
+
+  @property
+  def group(self):
+    return self.__base.group

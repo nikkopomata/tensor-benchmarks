@@ -649,12 +649,13 @@ class Tensor:
     self._idxs = tuple(idxmap[ll] for ll in self._idxs)
     self._dspace = {idxmap[ll]: self._dspace[ll] for ll in idxmap}
 
-  def renamed(self, idxmap, view=True, strict=False):
+  def renamed(self, idxmap, view=True, strict=False, overcomplete=False):
     """Return tensor with indices renamed
     argument is dictionary, or string a0-b0,a1-b1,...
     if view (default), returns as TensorTransposedView instead of copy
     if strict, must identify all indices; otherwise indices left out will be
-    preserved"""
+    preserved
+    if overcomplete, may identify absent indices"""
     if not isinstance(idxmap, dict):
       if not isinstance(idxmap, str) or \
           not re.fullmatch(r'\w+-\w+(,\w+-\w+)*',idxmap):
@@ -664,6 +665,9 @@ class Tensor:
       idxmap = dict(idxlist)
       if len(idxlist) != len(idxmap):
         raise ValueError('repeated index of tensor in \'%s\''%idxstr)
+    if overcomplete:
+      for l in set(idxmap)-self.idxset:
+        idxmap.pop(l)
     if len(idxmap) < self.rank:
       if strict: 
         raise ValueError('index \'%s\' missing from indices in strict renaming'\
