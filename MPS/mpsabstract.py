@@ -1057,6 +1057,7 @@ class TransferMatrix(ABC):
 
   def conj(self):
     # Call constructor
+    # TODO wouldn't work for more than 1/non-hermitian operators
     if self._psi2 is None:
       args = (self.psi,self.site,self._schmidtdir)
     else:
@@ -1262,6 +1263,10 @@ class LeftTransferManaged(LeftTransfer):
 
   @T.setter
   def T(self, value):
+    # Delete previous & regenerate ID
+    if self.id.hex in self.manager.database:
+      del self.manager.database[self.id.hex]
+    self.id = uuid.uuid1()
     self.manager.database[self.id.hex] = value
 
   def discard(self):
@@ -1391,9 +1396,11 @@ class RightTransferManaged(RightTransfer):
 
   @T.setter
   def T(self, value):
+    # Delete previous & regenerate ID
+    if self.id.hex in self.manager.database:
+      del self.manager.database[self.id.hex]
+    self.id = uuid.uuid1()
     self.manager.database[self.id.hex] = value
-    #with self.manager.shelfcontext() as shelf:
-      #shelf[self.id.hex] = value
 
   def discard(self):
     del self.manager.database[self.id.hex]

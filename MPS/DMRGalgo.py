@@ -716,7 +716,6 @@ class DMRGManager:
       self.checkdatabase()
     except AssertionError:
       self.logger.exception('Error checking database; recomputing transfers')
-      self.database.clear()
       self.regenerate()
 
   def regenerate(self):
@@ -1273,6 +1272,7 @@ class DMRGOrthoManager(DMRGManager):
     # (i,-1,:) -> dummy for if transfers w/ passive states dependent on i
     #   are kept
     self._ROstatespec = np.zeros((self.npsis,self.npsis+1,2),dtype=int)
+    self._ROstatespec[1:,-1,:] = 1
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
       nsweepadd=nsweepadd,usereflection=usereflection,useguess=True)
@@ -1328,7 +1328,8 @@ class DMRGOrthoManager(DMRGManager):
       self.settings['nsweepadd'] = 10
       self.__version = '0.2'
     if self.__version == '0.2':
-      self.eigtol = abs(self.eigtol)
+      if self.eigtol is not None:
+        self.eigtol = abs(self.eigtol)
       # transfLs/transfRs will have been converted from old form,
       # correct registered objects as appropriate for ortho form
       ntL,ntR = self._ROstatespec
@@ -1341,6 +1342,7 @@ class DMRGOrthoManager(DMRGManager):
       ipsi = self.psiindex
       for n,lr in reg:
         key = (n,lr,ipsi)
+        assert reg[n,lr].psi is self.psilist[ipsi] and reg[n,lr]._psi2 is None
         self._registry[key] = reg[n,lr]
         if (n,lr) in active:
           self._activeRO.add(key)
@@ -1354,13 +1356,17 @@ class DMRGOrthoManager(DMRGManager):
         assert len(self.dottransferR[i,j]) == ntR
         phi,psi = self.psilist[i],self.psilist[j]
         for n,tR in enumerate(self.dottransferR[i,j]):
-          key = (n-self.N+ntR,'r',i,j)
+          assert tR.psi is psi
+          assert tR._psi2 is phi
+          key = (self.N-ntR+n,'r',i,j)
           self._registry[key] = tR
           self._activeRO.add(key)
         self._ROstatespec[i,j,:] = (ntL,ntR)
         tLs = self.dottransferL.pop((i,j))
         assert len(tLs) == ntL
         for n,tL in enumerate(tLs):
+          assert tL.psi is psi
+          assert tL._psi2 is phi
           key = (n,'l',i,j)
           self._registry[key] = tL
           self._activeRO.add(key)
@@ -1376,7 +1382,7 @@ class DMRGOrthoManager(DMRGManager):
           self._ROstatespec[i,j,:] = (nL,nR)
           assert not np.any(self._ROstatespec[j,i,:])
           for n,tR in enumerate(tRs):
-            key = (n-self.N+len(tRs),'r',i,j)
+            key = (self.N-len(tRs)+n,'r',i,j)
             assert tR.psi is psi
             assert tR._psi2 is phi
             self._registry[key] = tR
@@ -1395,7 +1401,7 @@ class DMRGOrthoManager(DMRGManager):
           nL,nR = len(tLs),len(tRs)
           self._ROstatespec[i,i,:] = (nL,nR)
           for n,tR in enumerate(tRs):
-            key = (n-self.N+len(tRs),'r',i)
+            key = (self.N-len(tRs)+n,'r',i)
             assert tR.psi is psi
             assert tR._psi2 is None
             self._registry[key] = tR
@@ -1537,7 +1543,10 @@ class DMRGOrthoManager(DMRGManager):
 
   @property
   def _nullROstate(self):
-    return np.zeros((self.npsis,self.npsis+1,2),dtype=int)
+    ROnull = np.zeros((self.npsis,self.npsis+1,2),dtype=int)
+    ROnull[:,-1,:] = 1
+    ROnull[self.psiindex,-1,:] = 0
+    return ROnull
 
   def _initializeROs(self,statespec=None):
     for ipsi in range(self.npsis):
@@ -1592,22 +1601,45 @@ class DMRGOrthoManager(DMRGManager):
     transf = self._registry[key]
     if lr == 'l':
       if not isinstance(transf, LeftTransferManaged):
+        self.logger.warn('RO %s improper type',key)
         return False
     else:
       assert lr == 'r'
       if not isinstance(transf, RightTransferManaged):
+        self.logger.warn('RO %s improper type',key)
         return False
     if site != transf.site:
+      self.logger.warn('RO %s incorrect site %d',key,transf.site)
       return False
     if len(idx) == 1:
+      if transf.depth != 1:
+        self.logger.warn('RO %s wrong depth',key)
+      elif transf.operators[0] != self.H:
+        self.logger.warn('RO %s wrong operator',key)
+      elif transf._psi2 is not None:
+        self.logger.warn('RO %s wrong bra',key)
+      elif transf.psi is not self.psilist[idx[0]]:
+        self.logger.warn('RO %s wrong ket',key)
       return transf.depth == 1 and transf.operators[0] == self.H and transf._psi2 is None and transf.psi is self.psilist[idx[0]]
     elif len(idx) == 2:
       i,j = idx
+      if transf.depth != 0:
+        self.logger.warn('RO %s wrong depth',key)
+      elif transf._psi2 is not self.psilist[i]:
+        self.logger.warn('RO %s wrong bra',key)
+      elif transf.psi is not self.psilist[j]:
+        self.logger.warn('RO %s wrong ket',key)
       return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
         transf.psi is self.psilist[j]
     else:
       i,s,j = idx
       assert s == 'p'
+      if transf.depth != 0:
+        self.logger.warn('RO %s wrong depth',key)
+      elif transf._psi2 is not self.psilist[i]:
+        self.logger.warn('RO %s wrong bra',key)
+      elif transf.psi is not self.passive_states[j]:
+        self.logger.warn('RO %s wrong ket',key)
       return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
         transf.psi is self.passive_states[j]
 
