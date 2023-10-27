@@ -11,3 +11,7 @@ links.spacetype = 'tracked'
 def weak():
   links.VSpace = links.VectorSpaceTrackedWeak
   links.spacetype = 'weak'
+
+def ided(): # TODO make default?
+  links.VSpace = links.VectorSpaceIDed
+  links.spacetype = 'uuid'

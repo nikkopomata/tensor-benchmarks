@@ -2,7 +2,7 @@
 identifying indices with each other"""
 from abc import ABC, abstractmethod
 import collections
-import weakref
+import weakref,uuid
 
 spacetype = 'gen'
 
@@ -213,6 +213,44 @@ class VectorSpaceTrackedWeak(VectorSpaceTracked):
   def __setstate__(self,stt):
     pass
 
+class VectorSpaceIDed(VSAbstract):
+  """Use UUID instead of direct tracking
+  Does not require strict uniqueness of object
+  Maintains reference to dual for convenience (but does not pickle it)"""
+  # TODO is the not-pickling necessary?
+  # TODO special unpickler?
+  def __init__(self, dim, vsid=None):
+    self._dimension = int(dim)
+    if vsid is None:
+      self.__vsid = uuid.uuid1()
+    else:
+      self.__vsid = vsid
+    self.__dual = None
+    self.__dualid = None
+
+  def dual(self):
+    if self.__dual is None:
+      if self.__dualid is None:
+        self.__dualid = uuid.uuid1()
+      self.__dual = VectorSpaceIDed(self._dimension, vsid=self.__dualid)
+      self.__dual.__dual = self
+      self.__dual.__dualid = self.__vsid
+    return self.__dual
+
+  def __eq__(self, W):
+    return isinstance(W, self.__class__) and self.__vsid == W.__vsid
+
+  def __xor__(self, W):
+    return isinstance(W, self.__class__) and self.__dualid == W.__vsid
+
+  def __getstate__(self):
+    state = self.__dict__.copy()
+    del state['_VectorSpaceIDed__dual']
+    return state
+
+  def __setstate__(self, state):
+    self.__dict__.update(state)
+    self.__dual = None
 
 class TensorIndexDict:
   """Property-type descriptor for accessing information contained in VSpace

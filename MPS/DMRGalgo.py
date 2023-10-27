@@ -368,6 +368,7 @@ class DMRGManager:
 
   def _updateROstate(self, statespec, **kw_args):
     self._validateROstate(statespec)
+    # TODO pretty-print (or at least flatten) statespec
     self.logger.debug('Updating registry to state %s',statespec)
     newactive = self.ROstatelist(statespec)
     # Add new *in order*
@@ -380,7 +381,9 @@ class DMRGManager:
       self._discardRO(key)
 
   def clearall(self):
+    # TODO use database.clear + context manager?
     self._updateROstate(self._nullROstate)
+    self.database.clear()
     assert not self._activeRO
     assert self._inactiveRO == set(self._registry)
 
@@ -471,7 +474,7 @@ class DMRGManager:
       # Re-compute
       site,lr,*arg = key
       self.logger.warn('%s %stransfer vector at site %d missing; restoring',
-        'Right' if lr == 'r' else 'Left', site, arg if arg else '')
+        'Right' if lr == 'r' else 'Left', arg if arg else '', site)
       if site == 0 or site == self.N-1:
         transf.compute(None)
       else:
@@ -1112,7 +1115,10 @@ class PseudoShelf(MutableMapping):
     pickle.dump(value, open(self.fname(key),'wb'))
 
   def __delitem__(self, key):
-    os.remove(self.fname(key))
+    try:
+      os.remove(self.fname(key))
+    except FileNotFoundError:
+      config.logger.error('Attempted to delete missing database item')
 
   def __iter__(self):
     return (f[:-2] for f in os.listdir(self.path) if f[-2:] == '.p')
@@ -1344,37 +1350,62 @@ class DMRGOrthoManager(DMRGManager):
       self._ROstatespec[:,-1,:] = 1
       self._ROstatespec[self.psiindex,-1,:] = 0
 
-      for i,j in self.dottransfR:
-        assert len(self.dottransfR[i,j]) == ntR
+      for i,j in self.dottransferR:
+        assert len(self.dottransferR[i,j]) == ntR
         phi,psi = self.psilist[i],self.psilist[j]
-        for n,tR in enumerate(self.dottransfR[i,j]):
+        for n,tR in enumerate(self.dottransferR[i,j]):
           key = (n-self.N+ntR,'r',i,j)
           self._registry[key] = tR
           self._activeRO.add(key)
         self._ROstatespec[i,j,:] = (ntL,ntR)
-        tLs = self.dottransfL.pop((i,j))
+        tLs = self.dottransferL.pop((i,j))
         assert len(tLs) == ntL
         for n,tL in enumerate(tLs):
           key = (n,'l',i,j)
           self._registry[key] = tL
           self._activeRO.add(key)
       # Should have gone through everything
-      assert not self.dottransfL
-      for i,j in self.transfcacheR:
-        tRs = self.transfcacheR.pop((i,j))
-        tLs = self.transfcacheL.pop((i,j))
-        phi,psi = self.psilist[i],self.psilist[j]
-        nL,nR = len(tLs),len(tRs)
-        self._ROstatespec[i,j,:] = (nL,nR)
-        assert not np.any(self._ROstatespec[j,i,:])
-        for n,tR in enumerate(tRs):
-          key = (n-self.N+len(tRs),'r',i,j)
-          self._registry[key] = tR
-          self._activeRO.add(key)
-        for n,tL in enumerate(tLs):
-          key = (n,'l',i,j)
-          self._registry[key] = tL
-          self._activeRO.add(key)
+      assert not self.dottransferL
+      for kcache in list(self.transfcacheR):
+        if isinstance(kcache,tuple):
+          i,j = kcache
+          tRs = self.transfcacheR.pop((i,j))
+          tLs = self.transfcacheL.pop((i,j))
+          phi,psi = self.psilist[i],self.psilist[j]
+          nL,nR = len(tLs),len(tRs)
+          self._ROstatespec[i,j,:] = (nL,nR)
+          assert not np.any(self._ROstatespec[j,i,:])
+          for n,tR in enumerate(tRs):
+            key = (n-self.N+len(tRs),'r',i,j)
+            assert tR.psi is psi
+            assert tR._psi2 is phi
+            self._registry[key] = tR
+            self._activeRO.add(key)
+          for n,tL in enumerate(tLs):
+            key = (n,'l',i,j)
+            assert tL.psi is psi
+            assert tL._psi2 is phi
+            self._registry[key] = tL
+            self._activeRO.add(key)
+        else:
+          i = kcache
+          tRs = self.transfcacheR.pop(i)
+          tLs = self.transfcacheL.pop(i)
+          psi = self.psilist[i]
+          nL,nR = len(tLs),len(tRs)
+          self._ROstatespec[i,i,:] = (nL,nR)
+          for n,tR in enumerate(tRs):
+            key = (n-self.N+len(tRs),'r',i)
+            assert tR.psi is psi
+            assert tR._psi2 is None
+            self._registry[key] = tR
+            self._activeRO.add(key)
+          for n,tL in enumerate(tLs):
+            key = (n,'l',i)
+            assert tL.psi is psi
+            assert tL._psi2 is None
+            self._registry[key] = tL
+            self._activeRO.add(key)
       assert not self.transfcacheL
       # Generate empty transfers
       for i in range(self.npsis):
@@ -1397,8 +1428,8 @@ class DMRGOrthoManager(DMRGManager):
             self._registry[key] = LeftTransferManaged(psi, n, 'l', phi,
               manager=self)
 
-      delattr(self, 'dottransfR')
-      delattr(self, 'dottransfL')
+      delattr(self, 'dottransferR')
+      delattr(self, 'dottransferL')
       delattr(self, 'transfcacheL')
       delattr(self, 'transfcacheR')
       self.passive_states = []
@@ -1888,20 +1919,27 @@ class DMRGOrthoManager(DMRGManager):
     # Prepare initial guess
     # TODO regauge after update? 
     if self.settings['useguess']:
+      if gauge is None:
+        self.logger.log(5,'No gauge')
+      else:
+        self.logger.log(5,'"%s" gauge present',gauge[0])
       if gauge is not None and gauge[0] == 'l':
+        self.logger.log(5,'Gauging guess on right')
         M0 = self.psi.getTc(site).mat_mult('r-l',gauge[1])
         M0 = M0.diag_mult('l',self.psi.getschmidt(site-1))
       else:
         M0 = self.psi.getTL(site)
-      if not (nsites==1 and site+1==self.N):
         if nsites==1 and gauge is not None and gauge[0] == 'r':
+          self.logger.log(5,'Gauging guess on left')
           M0 = M0.mat_mult('l-r',gauge[1])
+      if not (nsites==1 and site+1==self.N):
         M0 = M0.diag_mult('r',self.psi.getschmidt(site))
       if nsites == 2:
         M0 = M0.contract(self.psi.getTR(site+1),'r-l;b>bl,~;b>br,~')
     else:
       M0 = None
-    w,v = Hshift.eigs(self.settings['keig'],which='LM',guess=M0, tol=self.eigtol)
+    etol = self.eigtol if self.eigtol is not None else 0
+    w,v = Hshift.eigs(self.settings['keig'],which='LM',guess=M0, tol=etol)
     self.logger.log(16,'Effective energy computed as %0.10f',min(w)+self.Eshift)
     return v[np.argmin(w)]
     
@@ -1982,7 +2020,7 @@ class DMRGOrthoManager(DMRGManager):
     self.logger.log(10, 'right edge single update')
     Heff = operators.NetworkOperator('(T);L;O;L.t-T.l,O.l-L.c,O.t-T.b;'
       'L.b>l,O.b>b', tL.T, self.H.getT(self.N-1))
-    M = self.optimize_tensor(Heff, self.N-1,1)
+    M = self.optimize_tensor(Heff, self.N-1,1,('r',gauge))
     ML,s,MR = M.svd('l|r,l|b')
     self.psi.setTR(MR,self.N-1,unitary=True)
     schmidt = s/np.linalg.norm(s)
