@@ -634,6 +634,13 @@ class MPOgeneric:
       assert N%nproc == 0
     assert N > 1
     periodic = (nproc < N) # Just repeating unit cell
+    if isinstance(missing_phys,links.VSAbstract):
+      # Only one space
+      missing_phys = [missing_phys]
+    if isinstance(missing_phys,list):
+      # Repeating pattern of physical indices
+      nphys = len(missing_phys)
+      missing_phys = {n:missing_phys[n%nphys] for n in range(N)}
     Ms = []
     states_left = [] # List of enumerated states on the left side of a site
     states_right = [] # List of enumerated states on the right side

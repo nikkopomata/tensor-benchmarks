@@ -1176,15 +1176,15 @@ class Tensor:
     if conj:
       vout2 = [~V for V in vout2]
     arr2 = T2._T
-    if conj:
-      arr2 = arr2.conj()
     try:
+      if conj:
+        arr2 = arr2.conj()
       T = np.tensordot(self._T,arr2,[i1,i2])
     except MemoryError as me:
       config.opt_log.warn('Handling MemoryError in Tensor._do_contract...')
       config.opt_log.debug('dimensions %s x %s', copy(self.shape), copy(T2.shape))
       config.opt_log.info('%dx%d->%d',self.numel,T2.numel,
-        functools.reduce(int.__mul__,[v.dim for v in vout1+vout2]))
+        np.multiply.reduce([v.dim for v in vout1+vout2]))
       import gc
       config.opt_log.info('Total elements of tensors in garbage-collection generations:')
       for gcgen in range(3):
@@ -1207,6 +1207,8 @@ class Tensor:
             numel += obj.numel
         config.opt_log.info('\t#%d: % 12d (%d objects)',gcgen, numel, nten)
       config.opt_log.warn('Re-trying contraction')
+      if conj:
+        arr2 = arr2.conj()
       T = np.tensordot(self._T,arr2,[i1,i2])
       #raise me
     if len(lout1)+len(lout2) == 0: # Scalar

@@ -947,6 +947,7 @@ class Network:
       return
     tenl = tuple(sorted(tensors))
     if config.memcap:
+      # TODO divide by itemsize after checking for issues
       memcap = int(config.memcap//config.memratio)
     else:
       memcap = None

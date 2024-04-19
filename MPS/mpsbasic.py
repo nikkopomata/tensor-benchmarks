@@ -491,6 +491,9 @@ class MPO(MPOgeneric):
     T = self.right_transfer(psi, 1, strict=strict)
     return T.left(terminal=True)
 
+  def dagger(self):
+    return self.__class__(M.conj().renamed('t-b,b-t') for M in self._matrices)
+
   def DMRG_opt_single_left(self, psi, TR, tol=None):
     #TODO Option to use NetworkOperator
     assert TR.site == 1

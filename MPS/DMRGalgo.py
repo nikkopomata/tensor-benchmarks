@@ -7,6 +7,9 @@ import numpy as np
 from copy import copy,deepcopy
 from collections.abc import MutableMapping
 
+# Commands that can be used within supervisor to initialize a state
+valid_initializers = ['announce']
+
 def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
     override=True, override_chis=True, resume_from_old=False, use_shelf=False,
     **dmrg_kw):
@@ -29,7 +32,15 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       if isinstance(chis, int):
         chis = [chis]
       config.streamlog.warn('Reloading manager from %s',filename)
-      Mngr = pickle.load(open(filename,'rb'))
+      try:
+        Mngr = pickle.load(open(filename,'rb'))
+      except:
+        config.logger.exception('Manager file apparently corrupted') 
+        if 'savesafe' in dmrg_kw and dmrg_kw['savesafe']:
+          config.logger.warning('Reloading from backup')
+          Mngr = pickle.load(open(filename+'.old','rb'))
+        else:
+          raise
       if resume_from_old and isinstance(Mngr, tuple):
         config.streamlog.info('Converting old savepoint')
         psi,sv = Mngr
@@ -90,7 +101,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       else:
         assert chis == Mngr.chis
       if Mngr.filename != filename:
-        config.streamlog.warn('Updating save destination from %s to %s',
+        config.streamlog.warning('Updating save destination from %s to %s',
           Mngr.filename, filename)
         Mngr.filename = filename
         Mngr.saveprefix = file_prefix
@@ -112,7 +123,7 @@ class DMRGManager:
               file_prefix=None, savefile='auto', use_shelf=False,
               Edelta=1e-8, schmidtdelta=1e-6,ncanon1=10,ncanon2=10,
               nsweep1=1000,nsweep2=100,tol2=1e-12,tol1=None,tol0=1e-12,
-              eigtol=None, eigtol_rel=None):
+              eigtol=None, eigtol_rel=None,tolratio=1,savesafe=False):
     """MPO Hamiltonian; list of bond dimensions (or single bond dimension)
       psi0 if provided is the initial state
       file_prefix: optional prefix to save after bond-dimension steps
@@ -129,8 +140,9 @@ class DMRGManager:
         single update, & double update respectively
       eigtol, if provided, is the tolerance for iterative eigenvalue solver
       eigtol_rel instead gives eigtol relative to change in E
-        (initial value tolerance is still eigtol)"""
-    self.__version = '1.0'
+        (initial value tolerance is still eigtol)
+      tolratio gives increase in tolerance for double update"""
+    self.__version = '1.0.3'
     if isinstance(chis,int):
       self.chis = [chis]
     else:
@@ -164,7 +176,8 @@ class DMRGManager:
     # General (all-bond-dimension) settings
     self.settings_allchi = dict(Edelta=Edelta, schmidtdelta=schmidtdelta,
            ncanon1=ncanon1,ncanon2=ncanon2,nsweep1=nsweep1,nsweep2=nsweep2,
-           tol0=tol0,tol1=tol1,tol2=tol2,eigtol=eigtol,eigtol_rel=eigtol_rel)
+           tol0=tol0,tol1=tol1,tol2=tol2,eigtol=eigtol,eigtol_rel=eigtol_rel,
+           tolratio=tolratio,savesafe=False)
     self.settings = {}
     # Additional settings by bond dimension
     self.chirules = {}
@@ -332,6 +345,16 @@ class DMRGManager:
         delattr(self, 'transfLs')
         self.__version = '1.0'
       # TODO recovery options if directory is expected but does not exist
+      if self.__version == '1.0':
+        self.settings['savesafe'] = False
+        self.__version = '1.0.1'
+      if self.__version == '1.0.1':
+        self.settings['tolratio'] = 1
+        self.__version = '1.0.2'
+      if self.__version == '1.0.2':
+        if isinstance(self.database,PseudoShelf):
+          self.database._backup_dict = {}
+        self.__version = '1.0.3'
     self.chirules = {}
     self._initfuncs()
     self.supervisors = 'paused'
@@ -473,7 +496,7 @@ class DMRGManager:
     if transf.id.hex not in self.database:
       # Re-compute
       site,lr,*arg = key
-      self.logger.warn('%s %stransfer vector at site %d missing; restoring',
+      self.logger.warning('%s %stransfer vector at site %d missing; restoring',
         'Right' if lr == 'r' else 'Left', arg if arg else '', site)
       if site == 0 or site == self.N-1:
         transf.compute(None)
@@ -515,13 +538,18 @@ class DMRGManager:
     """Reset list of bond dimensions; purge bond-dimension-dependent rules
     and pick chiindex"""
     self.chis = chis
+    inc = False
     if self.supstatus == 'complete':
       if self.chi >= chis[-1]:
         # All completed
         return
       else:
-        self.supstatus = []
+        self.supstatus = [None]
+        self.suplabels = ['base']
+        inc = True
     if self.chi not in chis:
+      if inc:
+        use_as = 'higher'
       if not use_as:
         raise KeyError('Current bond dimension not in new list')
       nbelow = sum(c < self.chi for c in chis)
@@ -534,9 +562,12 @@ class DMRGManager:
       self.chi = chis[self.chiindex]
     else:
       self.chiindex = chis.index(self.chi)
+      if inc:
+        self.chiindex += 1
+        self.chi = chis[self.chiindex]
     self.chirules = {}
     # Restart base supervisor
-    if len(self.supstatus):
+    if len(self.supstatus) and self.supstatus[0] is not None:
       self.supstatus[0] = (self.chi,)+self.supstatus[0][1:]
     if self.supervisors != 'paused' and len(self.supervisors):
       self.supervisors[0] = self.supfunctions['base'](self.chis,self.N,self.settings,self.supstatus[0])
@@ -600,13 +631,15 @@ class DMRGManager:
 
   def save(self):
     if self.filename:
-      try:
-        pickle.dump(self,open(self.filename,'wb'))
-      except MemoryError:
-        self.logger.error('Encountered MemoryError while saving (consider adjusting)')
-        import gc
-        gc.collect()
-        pickle.dump(self,open(self.filename,'wb'))
+      if self.settings['savesafe']:
+        oldfile = self.filename+'.old'
+        if os.path.isfile(oldfile):
+          os.rename(oldfile,oldfile+'.old')
+        if os.path.isfile(self.filename):
+          os.rename(self.filename,oldfile)
+      safedump(self, self.filename)
+      if self.settings['savesafe'] and os.path.isfile(self.filename+'.old.old'):
+        os.remove(self.filename+'.old.old')
 
   def savecheckpoint(self, level):
     if config.haltsig:
@@ -621,7 +654,7 @@ class DMRGManager:
   def savestep(self):
     """Save output after optimizing a single bond dimension"""
     self.logger.log(20,'Saving completed bond dimension %s',self.chi)
-    pickle.dump((self.psi,self.E),open(f'{self.saveprefix}c{self.chi}.p','wb'))
+    safedump((self.psi,self.E),f'{self.saveprefix}c{self.chi}.p',newsave=True)
 
   def resettol(self):
     """Reset eigtol_rel to eigtol"""
@@ -639,6 +672,13 @@ class DMRGManager:
       if isinstance(rv,DMRGManager):
         self.logger.log(15, 'Loaded from manager')
         self.psi = rv.psi
+        if len(rv.suplabels) == 3 and rv.suplabels[2] == 'singlesweep':
+          site,direction,gauge = rv.supstatus[2]
+          self.logger.info('Gauging (%s) at site %d',direction,site)
+          if direction == 'r' or site == self.N-1:
+            self.psi.lgauge(gauge,site)
+          else:
+            self.psi.rgauge(gauge,site)
       else:
         self.logger.log(15, 'Loaded as state')
         assert isinstance(rv, MPS)
@@ -656,7 +696,8 @@ class DMRGManager:
     self._initializeROs()
     if not self.psi.iscanon():
       self.restorecanonical()
-    self.getE()
+    if not self.E:
+      self.getE()
 
   def setchi(self, idx, chi):
     # Step data
@@ -681,7 +722,7 @@ class DMRGManager:
   def setdbon(self):
     dbpath = self.filename[:-1]+'d'
     if not self.dbpath:
-      self.logger.warn('Transferring transfer tensors to shelf...')
+      self.logger.warning('Transferring transfer tensors to shelf...')
       # Create database
       database = PseudoShelf(dbpath)
       database.update(self.database)
@@ -693,25 +734,33 @@ class DMRGManager:
     elif dbpath != self.dbpath:
       self.logger.info('Copying shelf from %s to %s',dbpath,self.dbpath)
       if isinstance(self.database,PseudoShelf):
-        self.dbpath = dbpath
+        self.dbpath,dbp0 = dbpath,self.dbpath
         try:
           self.database.copyto(dbpath)
         except FileNotFoundError:
-          self.logger.warn('Shelf directory not found, repopulating %d left '
+          self.logger.warning('Shelf directory not found, repopulating %d left '
             'and %d right transfer vectors', *self._ROstatespec)
           self.regenerate()
+        except FileExistsError:
+          assert not os.path.isdir(dbp0)
+          self.logger.warning('Assuming database has already been moved to %s',
+            dbpath)
+          # TODO it's natural to move paths, should have better checks
+          self.database.path = os.path.abspath(dbpath)
       else:
         self.database = PseudoShelf(dbpath)
         try:
           self.database.update(self.dbpath)
         except FileNotFoundError:
-          self.logger.warn('Shelf directory not found, repopulating %d left and '
+          self.logger.warning('Shelf directory not found, repopulating %d left and '
             '%d right transfer vectors', self.ntransfL,self.ntransfR)
           self.regenerate()
       # Move database
+      # TODO should this save command be here?
       self.save()
     else:
       self.logger.debug('Shelf already in place')
+      self.database.path = dbpath
     try:
       self.checkdatabase()
     except AssertionError:
@@ -745,12 +794,12 @@ class DMRGManager:
 
   def setdboff(self, remove=True):
     if self.dbpath:
-      self.logger.warn('Converting shelf into local memory...')
+      self.logger.warning('Converting shelf into local memory...')
       database = {}
       for k in self.database:
         database[k] = self.database[k]
       if remove:
-        self.logger.warn('Deleting shelf database directory')
+        self.logger.warning('Deleting shelf database directory')
         shutil.rmtree(self.dbpath)
       self.database = database
       self.dbpath = None
@@ -848,8 +897,9 @@ class DMRGManager:
     self.shiftrightupto(n+1)
     tR = self.gettransfR(n+2)
     tL = self.gettransfL(n-1)
+    eigtol = min(self.settings['eigtol'],self.eigtol*self.settings['tolratio'])
     self.H.DMRG_opt_double(self.psi, n, self.chi,
-        tL,tR,None,direction=='r', self.settings['tol2'], self.eigtol)
+        tL,tR,None,direction=='r', self.settings['tol2'], eigtol)
 
   def singleupdateleft(self):
     self.shiftleftupto(0)
@@ -920,9 +970,15 @@ class DMRGManager:
       level = 0
       while len(self.supervisors) < len(self.supstatus):
         cmd,*argall = next(sup)
-        while cmd == 'announce':
-          config.streamlog.log(30, argall[0])
-          cmd,*argall = next(sup)
+        while cmd in valid_initializers:
+          # TODO this is still too messy
+          if cmd == 'announce':
+            config.streamlog.log(30, argall[0])
+            cmd,*argall = next(sup)
+          else:
+            args, = argall
+            sendval = self.supcommands[cmd](*args)
+            cmd,*argall = self.supervisors[-1].send(sendval)
         (label,*args),status = argall
         assert cmd == 'runsub' and label == self.suplabels[level+1]
         if self.supstatus[level] != status:
@@ -950,7 +1006,7 @@ class DMRGManager:
           savequit = self.savecheckpoint(level)
           if savequit:
             import sys
-            sys.exit()
+            sys.exit(config.SIGSAVE)
       # Options for cmd
       if cmd == 'complete':
         # Subroutine completed execution
@@ -979,7 +1035,9 @@ class DMRGManager:
         # Algorithm-specific options
         sendval = self.supcommands[cmd](*args)
     self.supstatus = 'complete'
+    self.clearall()
     self.save()
+    self.savestep()
     return self.returnvalue()
 
 def baseSupervisor(chis, N, settings, state=None):
@@ -1016,6 +1074,9 @@ def doubleOptSupervisor(N, settings, state=None):
     yield 'saveschmidt', ()
   else:
     i0, = state
+    if i0 >= settings['nsweep2']:
+      yield 'announce', 'Completing sweep then ending cycle'
+      i0 = settings['nsweep2']-1
   for niter in range(i0,settings['nsweep2']):
     E = yield 'runsub',('doublesweep',N),(niter,)
     if niter % settings['ncanon2'] == 0:
@@ -1089,8 +1150,8 @@ def singleSweepSupervisor(N, settings, state=None):
 def adiff(v1,v2):
   # RMS difference between two (sorted) lists of potentially different size 
   numel = max(len(v1),len(v2))
-  a1 = np.pad(v1,(0,numel-len(v1)))
-  a2 = np.pad(v2,(0,numel-len(v2)))
+  a1 = np.pad(sorted(v1),(numel-len(v1),0))
+  a2 = np.pad(sorted(v2),(numel-len(v2),0))
   return np.linalg.norm(a1-a2)
 
 class PseudoShelf(MutableMapping):
@@ -1101,36 +1162,66 @@ class PseudoShelf(MutableMapping):
     if not os.path.isdir(dirname):
       os.mkdir(dirname)
     self.path = dirname
+    self._backup_dict = {}
 
   def fname(self, key):
     return os.path.join(self.path,key+'.p')
 
   def __getitem__(self, key):
+    if key in self._backup_dict:
+      return self._backup_dict[key]
     if not os.path.isfile(self.fname(key)):
       raise KeyError(key)
-    return pickle.load(open(self.fname(key),'rb'))
+    try:
+      return pickle.load(open(self.fname(key),'rb'))
+    except (EOFError,IOError,OSError):
+      config.logger.exception('Unable to access PseudoShelf file %s',self.fname(key))
+      import time
+      tic = time.time()
+      for ntry in range(config.file_timeout):
+        toc = time.time()
+        try:
+          return pickle.load(open(self.fname(key),'rb'))
+        except (EOFError,IOError,OSError):
+          config.logger.warning('Retry #%d failed',ntry)
+        if toc-tic > config.file_timeout:
+          break
+      raise
 
   def __setitem__(self, key, value):
-    pickle.dump(value, open(self.fname(key),'wb'))
+    if key in self._backup_dict:
+      del self._backup_dict[key]
+    try:
+      pickle.dump(value, open(self.fname(key),'wb'))
+    except:
+      config.logger.exception('Unable to write to %s; using backup dictionary')
+      self._backup_dict[key] = value
 
   def __delitem__(self, key):
+    if key in self._backup_dict:
+      del self._backup_dict[key]
     try:
       os.remove(self.fname(key))
     except FileNotFoundError:
       config.logger.error('Attempted to delete missing database item')
 
   def __iter__(self):
-    return (f[:-2] for f in os.listdir(self.path) if f[-2:] == '.p')
+    dirgen = (f[:-2] for f in os.listdir(self.path) if f[-2:] == '.p')
+    if self._backup_dict:
+      return itertools.chain(self._backup_dict.keys(),dirgen)
+    else:
+      return dirgen
   
   def __len__(self):
-    return len(os.listdir(self.path))
+    return len(os.listdir(self.path)) + len(self._backup_dict)
 
   def __contains__(self, key):
-    return os.path.isfile(self.fname(key))
+    return os.path.isfile(self.fname(key)) or key in self._backup_dict
 
   def clear(self):
     for f in os.listdir(self.path):
       os.remove(os.path.join(self.path,f))
+    self._backup_dict.clear()
 
   def checkentries(self):
     """Load files to check. Removes invalid or corrupt files.
@@ -1145,7 +1236,7 @@ class PseudoShelf(MutableMapping):
       try:
         obj = pickle.load(open(os.path.join(self.path,f),'rb'))
         del obj
-      except e:
+      except:
         config.logger.exception('Entry with key %s corrupted; removing',key)
       keys.add(key)
     return keys
@@ -1170,6 +1261,7 @@ class PseudoShelf(MutableMapping):
 
   def update(self, d):
     # If PseudoShelf or valid directory, copy files; otherwise proceed as normal
+    # TODO account for backup
     if isinstance(d,PseudoShelf):
       d = d.path
     if isinstance(d,str):
@@ -1242,7 +1334,8 @@ class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
   def __init__(self, Hamiltonian, chis, npsis, fixed_states=None,
       ortho_tol=1e-7, keig=1, newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,
-      nsweepadd=10, persiteshift=0, usereflection=False, **kw_args):
+      nsweepadd=10, persiteshift=0, usereflection=False, addupdatedouble=True,
+      **kw_args):
     self.psiindex = 0
     self.npsi_tot = npsis
     self.npsis = 1
@@ -1265,7 +1358,7 @@ class DMRGOrthoManager(DMRGManager):
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
-    self.__version = '1.0'
+    self.__version = '1.0.1'
     # State specification:
     # (i,i,<0/1>) -> number of <left/right> Hamiltonian transfers for state i
     # (i,j,<0/1>) -> number of transfers between states i and j
@@ -1275,7 +1368,8 @@ class DMRGOrthoManager(DMRGManager):
     self._ROstatespec[1:,-1,:] = 1
     self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
       newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
-      nsweepadd=nsweepadd,usereflection=usereflection,useguess=True)
+      nsweepadd=nsweepadd,usereflection=usereflection,
+      addupdatedouble=addupdatedouble,useguess=True)
     self.settings.update(self.settings_allchi)
 
   def __setstate__(self, state):
@@ -1443,6 +1537,10 @@ class DMRGOrthoManager(DMRGManager):
       self.passive_dependency = {j:[] for j in range(self.npassive)}
       self.settings['usereflection'] = False
       self.__version = '1.0'
+    if self.__version == '1.0':
+      self.settings_allchi['addupdatedouble'] = True
+      self.settings['addupdatedouble'] = True
+      self.__version = '1.0.1'
 
   @property
   def nlefttransf(self):
@@ -1503,12 +1601,13 @@ class DMRGOrthoManager(DMRGManager):
     self.supcommands['shiftbench'] = self.shiftbenchmark
     self.supcommands['benchmark1'] = self.benchmark1
     self.supcommands['benchmark2'] = self.benchmark2
+    self.supcommands['getdiff'] = self.get_schmidt_diff
 
   def savestep(self):
     """Save output after completing bond-dimension optimization"""
     self.logger.log(20,'Saving states with bond dimension %d',self.chi)
     for i in range(self.npsis):
-      pickle.dump((self.psilist[i],self.Es[i]),open(f'{self.saveprefix}c{self.chi}n{i}.p','wb'))
+      safedump((self.psilist[i],self.Es[i]),f'{self.saveprefix}c{self.chi}n{i}.p',newsave=True)
 
   def check_add_state(self, niter, delta):
     if self.npsis == 1 and delta is None:
@@ -1567,8 +1666,8 @@ class DMRGOrthoManager(DMRGManager):
           self._registry[site,'l',ipsi,jpsi] = LeftTransferManaged(phi,
             site,'l', psi, manager=self)
         for site in range(1,self.N):
-          self._registry[site,'r',jpsi,ipsi] = RightTransferManaged(phi,
-            site,'r', psi, manager=self)
+          self._registry[site,'r',jpsi,ipsi] = RightTransferManaged(psi,
+            site,'r', phi, manager=self)
           self._registry[site,'r',ipsi,jpsi] = RightTransferManaged(phi,
             site,'r', psi, manager=self)
       for jpass,phi in enumerate(self.passive_states):
@@ -1712,7 +1811,7 @@ class DMRGOrthoManager(DMRGManager):
 
   def benchmark2(self):
     # Get energy & schmidt-difference for current state
-    self.getE(savelast=False,updaterel=False)
+    #self.getE(savelast=False,updaterel=False)<--was this here for a reason?
     # TODO full RMS option?
     Ldiff = 0
     for n,l0 in enumerate(self.schmidt0):
@@ -1742,6 +1841,10 @@ class DMRGOrthoManager(DMRGManager):
     self.getE(savelast=False,updaterel=False)
     self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
     config.streamlog.log(25,f'\t#%d %#-10.4g %#-+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
+
+  def get_schmidt_diff(self):
+    # Return schmidt difference for current state -- assume benchmark has run
+    return self.dschmidts[self.psiindex]
 
   def compare1(self, niter, which='all'):
     assert which == 'all'
@@ -2122,6 +2225,7 @@ def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
       yield 'setchi',(cidx,chis[cidx])
   yield 'complete',()
 
+# TODO bond dimension only for state initialization
 def doubleOrthoSupervisor(N, npsis, settings, state=None):
   # Only perform double update--do not introduce new states
   yield 'announce', 'Double update'
@@ -2162,6 +2266,65 @@ def doubleOrthoSupervisor(N, npsis, settings, state=None):
   yield 'select', (0,None)
   yield 'complete', ()
 
+def mixedDoubleOrthoSupervisor(N, npsis, settings, state=None):
+  # Perform single or double update depending on last step
+  yield 'announce', 'Double update (mixed)'
+  if state is None:
+    psi0 = 0 # Starting index of state
+    n0 = 0 # Current niter
+    firstrun = settings['firstrun'] if 'firstrun' in settings else 'auto'
+    if firstrun == 1:
+      single_next = npsis*[True]
+    elif firstrun == 2:
+      single_next = npsis*[False]
+    else:
+      assert firstrun == 'auto'
+      single_next = (npsis-1)*[True]+[False]
+    # TODO rest of implementation
+    yield 'righttransf', (2,)
+    yield 'saveschmidt', ()
+  else:
+    n0,psi0,npsis,single_next = state
+  if 'sd_switch' in settings:
+    sd_switch = settings['sd_switch']
+  else:
+    sd_switch = .001
+  for niter in range(n0,settings['nsweep2']):
+    for ipsi in range(psi0,npsis):
+      if single_next[ipsi]:
+        E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsis,single_next)
+      else:
+        E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsis,single_next)
+      yield 'benchmark2', ()
+      diff = yield 'getdiff', ()
+      single_next[ipsi] = (diff < sd_switch)
+      if ipsi+1 != npsis:
+        yield 'select', (ipsi+1,(-1,2-single_next[ipsi+1]))
+      yield 'saveschmidt', ()
+    psi0 = 0
+    diff = yield 'compare2', (niter,)
+    if diff < settings['schmidtdelta']:
+      yield 'clearall', ()
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      break
+    if niter % settings['ncanon2'] == 0:
+      yield 'clearall', ()
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'canonical', (True,)
+      for ipsi in range(npsis):
+        yield 'select',(ipsi,None)
+        yield 'righttransf', (2,) #TODO use gauge?
+    yield 'select',(0,(-1,2-single_next[(ipsi+1)%npsis]))
+    yield 'shiftbench', ()
+    yield 'saveschmidt', ()
+  yield 'shiftbench', ()
+  yield 'select', (0,None)
+  yield 'complete', ()
+
+
 def addStateSupervisor(N, npsi, settings, state=None):
   # Supervisor for introducing one new state, baking in, & performing some
   # optimization
@@ -2189,13 +2352,21 @@ def addStateSupervisor(N, npsi, settings, state=None):
     yield 'saveschmidt', ()
     niter = 0
     psi0 = 0
+  yield 'announce', 'Updating all'
   while niter < settings['nsweepadd']:
+    if settings['addupdatedouble'] > 1:
+      wdouble = (npsi%settings['addupdatedouble'])==0
+    else:
+      wdouble = settings['addupdatedouble']
     for ipsi in range(psi0,npsi):
-      E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsi)
+      if wdouble:
+        E = yield 'runsub',('doublesweep',N),(niter,ipsi,npsi)
+      else:
+        E = yield 'runsub',('singlesweep',N),(niter,ipsi,npsi)
       yield 'benchmark2', ()
       yield 'saveschmidt', ()
       if ipsi+1 != npsi:
-        yield 'select', (ipsi+1,(-1,2))
+        yield 'select', (ipsi+1,(-1,1+wdouble))
     psi0 = 0
     # Just put everything in canonical form
     yield 'clearall', ()
@@ -2337,3 +2508,27 @@ def singleOrthoSupervisor(N, npsis, settings, state=None):
   yield 'select', (0,None)
   yield 'complete', ()
   
+valid_paths=set()
+def safedump(data, fname, newsave=False):
+  savedir = os.path.abspath(fname)
+  try:
+    try:
+      pickle.dump(data, open(fname,'wb'))
+    except MemoryError:
+      config.logger.exception('Encountered MemoryError while saving (consider adjusting)')
+      import gc
+      gc.collect()
+      pickle.dump(data, open(fname,'wb'))
+  except Exception:
+    if config.backupdir is None:
+      config.logger.exception('File write failed; please correct')
+    elif not newsave and savedir not in valid_paths:
+      # Just break
+      raise
+    else:
+      altname = os.path.join(config.backupdir,os.path.basename(fname))
+      config.logger.exception('File write failed; writing to alternate location %s',altname)
+      pickle.dump(data, open(altname,'wb'))
+  else:
+    # Successful save
+    valid_paths.add(savedir)

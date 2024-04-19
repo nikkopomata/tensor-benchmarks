@@ -21,6 +21,10 @@ flush = True
 svd_retry = 1
 # 'Load-only mode' (don't change/fix anything found incomplete during unpickling
 loadonly = False
+# Directory to save to if ordinary saves fail
+backupdir = None
+# Seconds to wait for restored access
+file_timeout = 0
 
 def restrict_memory(newmemcap):
   import resource
@@ -61,3 +65,12 @@ def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
 
 # Signalling
 haltsig = False
+import signal
+SIGSAVE = signal.SIGRTMIN+2
+def setsigsave():
+    logger.info('Signal to save and quit %d',SIGSAVE)
+    def sigstop(signum, frame):
+      global haltsig
+      logger.critical('Telling process to quit after next save...')
+      haltsig = True
+    signal.signal(SIGSAVE,sigstop)
