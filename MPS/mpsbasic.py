@@ -249,13 +249,13 @@ class MPS(MPSgeneric):
     pnames = [s+suffix for s in sitenames]
     assert 'virt' not in pnames
     # Left half
-    L = psi.getTL(0).renamed({'b':pnames[0],'r':'virt'})
-    for n in range(1,self.N//2):
-      L = L.contract(psi.getTL(n),f'virt-l;~;b>{pnames[n]},r>virt')
+    L = self.getTL(0).renamed({'b':pnames[0],'r':'virt'})
+    for n in range(1,self.N//2+1):
+      L = L.contract(self.getTL(n),f'virt-l;~;b>{pnames[n]},r>virt')
     # Right half
-    R = psi.getTL(-1).renamed({'b':pnames[-1],'l':virt})
-    for n in range(self.N-1,N//2-1,-1):
-      R = R.contract(psi.getTL(n),f'virt-r;~;b>{pnames[n]},l>virt')
+    R = self.getTL(-1).renamed({'b':pnames[-1],'l':'virt'})
+    for n in range(self.N-2,self.N//2,-1):
+      R = R.contract(self.getTL(n),f'virt-r;~;b>{pnames[n]},l>virt')
     return L.contract(R,'virt-virt;~')
 
   def tebd_left(self, U, chi):
