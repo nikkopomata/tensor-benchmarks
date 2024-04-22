@@ -23,6 +23,8 @@ svd_retry = 1
 loadonly = False
 # Directory to save to if ordinary saves fail
 backupdir = None
+# File to use for holding locks while saving
+synclockfile = None
 # Seconds to wait for restored access
 file_timeout = 0
 
@@ -58,6 +60,15 @@ stdout_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
 logger.addHandler(stdout_handler)
 def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
   handler = logging.FileHandler(logfile,mode=mode)
+  formatter = logging.Formatter(fmt=fmtstring, datefmt=datefmt)
+  handler.setLevel(level)
+  handler.setFormatter(formatter)
+  logger.addHandler(handler)
+def setrotlogging(logfile, fmtstring, level=logging.DEBUG, 
+    datefmt=None,mode='a',size=2**26,count=1000):
+  import logging.handlers
+  handler = logging.handlers.RotatingFileHandler(logfile,mode=mode,
+    maxBytes=size,backupCount=count)
   formatter = logging.Formatter(fmt=fmtstring, datefmt=datefmt)
   handler.setLevel(level)
   handler.setFormatter(formatter)

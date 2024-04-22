@@ -389,10 +389,14 @@ class DMRGManager:
     self._activeRO.remove(key)
     self._inactiveRO.add(key)
 
+  def _printROspec(self, statespec):
+    # 'Pretty-print' RO state: by default just let logger use str()
+    return statespec
+
   def _updateROstate(self, statespec, **kw_args):
     self._validateROstate(statespec)
     # TODO pretty-print (or at least flatten) statespec
-    self.logger.debug('Updating registry to state %s',statespec)
+    self.logger.debug('Updating registry to state %s',self._printROspec(statespec))
     newactive = self.ROstatelist(statespec)
     # Add new *in order*
     for key in newactive:
@@ -1696,6 +1700,7 @@ class DMRGOrthoManager(DMRGManager):
     assert np.all(spec[:,-1,:] < 2)
 
   def _validateRO(self, key):
+    self.logger.debug('Validating RO %s',key)
     site,lr,*idx = key
     transf = self._registry[key]
     if lr == 'l':
@@ -1742,6 +1747,24 @@ class DMRGOrthoManager(DMRGManager):
       return transf.depth == 0 and transf._psi2 is self.psilist[i] and \
         transf.psi is self.passive_states[j]
 
+  def _printROspec(self, statespec):
+    rv = ''
+    for i in range(self.npsis):
+      rv += f'\n{i: 4d}: 0'
+      j0,(l0,r0) = 0,statespec[i,0]
+      for j in range(1,self.npsis):
+        l,r = statespec[i,j]
+        if l != l0 or r != r0:
+          # New pair
+          if j-j0 > 1:
+            rv += f'-{j-1}'
+          rv += f'>{l0}L{r0}R,{j}'
+          j0,l0,r0 = j,l,r
+      if j0 < self.npsis-1:
+        rv += f'-{self.npsis-1}'
+      rv += f'>{l0}L{r0}R {"P" if statespec[i,j,0] else "X"}'
+    return rv
+    
   def ROstatelist(self, statespec):
     states = []
     for i in range(self.npsis):
@@ -1839,7 +1862,11 @@ class DMRGOrthoManager(DMRGManager):
     self.dschmidts[self.psiindex] = Ldiff
     self.logger.log(15, '[#%d] schmidt diff %s', self.psiindex, Ldiff)
     self.getE(savelast=False,updaterel=False)
-    self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
+    try:
+      self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
+    except TypeError:
+      self.E0 = 0
+      self.logger.log(15, '[#%d]  energy diff %s', self.psiindex, self.E-self.E0)
     config.streamlog.log(25,f'\t#%d %#-10.4g %#-+10.4g E=%0.10f',self.psiindex,Ldiff,self.E-self.E0,self.E)
 
   def get_schmidt_diff(self):
@@ -2511,14 +2538,21 @@ def singleOrthoSupervisor(N, npsis, settings, state=None):
 valid_paths=set()
 def safedump(data, fname, newsave=False):
   savedir = os.path.abspath(fname)
+  ftmp = os.path.join(os.path.dirname(savedir),'~'+os.path.basename(fname))
+  if config.synclockfile is not None:
+    import fcntl
+    fd = open(config.synclockfile,'r')
+    fcntl.lockf(fd,fcntl.LOCK_SH)
+  else:
+    fd = None
   try:
     try:
-      pickle.dump(data, open(fname,'wb'))
+      pickle.dump(data, open(ftmp,'wb'))
     except MemoryError:
       config.logger.exception('Encountered MemoryError while saving (consider adjusting)')
       import gc
       gc.collect()
-      pickle.dump(data, open(fname,'wb'))
+      pickle.dump(data, open(ftmp,'wb'))
   except Exception:
     if config.backupdir is None:
       config.logger.exception('File write failed; please correct')
@@ -2527,8 +2561,15 @@ def safedump(data, fname, newsave=False):
       raise
     else:
       altname = os.path.join(config.backupdir,os.path.basename(fname))
+      alttmp = os.path.join(config.backupdir,'~'+os.path.basename(fname))
       config.logger.exception('File write failed; writing to alternate location %s',altname)
-      pickle.dump(data, open(altname,'wb'))
+      pickle.dump(data, open(alttmp,'wb'))
+      os.rename(alttmp,altname)
   else:
     # Successful save
+    os.rename(ftmp,fname)
     valid_paths.add(savedir)
+  if fd is not None:
+    import fcntl
+    fcntl.lockf(fd,fcntl.LOCK_UN)
+    fd.close()
