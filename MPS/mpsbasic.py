@@ -60,8 +60,9 @@ class MPS(MPSgeneric):
         if not (Ms[n]._dspace['r'] ^ Ms[n+1]._dspace['l']):
           raise ValueError(f'Failure in bond matching at sites {n}-{n+1}')
         d = Ms[n].dshape['r']
-        self._schmidt.append(d*[1/d])
-      self.restore_canonical(tol=tol)
+        self._schmidt.append(d*[1])
+      if tol is not None:
+        self.restore_canonical(tol=tol)
 
   def iscanon(self):
     # Just check boolean flags
@@ -492,7 +493,7 @@ class MPO(MPOgeneric):
     return T.left(terminal=True)
 
   def dagger(self):
-    return self.__class__(M.conj().renamed('t-b,b-t') for M in self._matrices)
+    return self.__class__([M.conj().renamed('t-b,b-t') for M in self._matrices])
 
   def DMRG_opt_single_left(self, psi, TR, tol=None):
     #TODO Option to use NetworkOperator
@@ -789,8 +790,8 @@ class MPO(MPOgeneric):
 
 class MPSirrep(MPS):
   """MPS "charged" (transforms under irrep) at site charge_site"""
-  def __init__(self, Ms, irrep, chargesite, schmidt=None):
-    super().__init__(Ms, schmidt)
+  def __init__(self, Ms, irrep, chargesite, schmidt=None, tol=1e-15):
+    super().__init__(Ms, schmidt, tol=tol)
     self._irrep = irrep
     self._site = chargesite
 

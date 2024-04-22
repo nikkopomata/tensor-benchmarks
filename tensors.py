@@ -1550,9 +1550,9 @@ class Tensor:
     if selection is not None:
       if isinstance(selection, int):
         if selection < 0:
-          selection = (selection%N,N-1)
+          selection = (max(selection+N,0),N-1)
         else:
-          selection = (0, selection-1)
+          selection = (0, min(selection,N)-1)
       elif not isinstance(selection, tuple):
         raise ValueError('selection argument must be integer or tuple')
       nn = selection[1] - selection[0] + 1
