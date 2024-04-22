@@ -1291,7 +1291,7 @@ class RightTransfer(TransferMatrix):
       bondv = f'ket.b-O0.t,bra.b-O{self.depth-1}.b'
       outstr += ',O0.l>'+self.opidx[0]
       for i in range(1,self.depth):
-        outstr += f',O{i}.r>{self.opidx[i]}'
+        outstr += f',O{i}.l>{self.opidx[i]}'
         bondh += f',T.{self.opidx[i]}-O{i}.r'
         bondv += f',O{i-1}.b-O{i}.t'
     if terminal:
