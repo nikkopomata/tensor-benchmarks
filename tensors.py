@@ -1520,7 +1520,7 @@ class Tensor:
       if V is None:
         V = V0.trim(idx_bool)
       spaces[i] = V.dual() if c else V
-    return self._tensorfactory(T, self._idxs, spaces)
+    return self._tensorfactory(T, self._idxs, tuple(spaces))
 
   @_endomorphic
   def eig(self, lidx, ridx, herm=True, selection=None, left=False, vecs=True,

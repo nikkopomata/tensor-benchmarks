@@ -989,6 +989,8 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     reverse = ('reverse' in kw_args and kw_args['reverse'])
     for k,n in VL:
       # k is from left index symmetry => irrep of right eigenvectors
+      if n == 0:
+        continue
       d = self.group.dim(k)
       idx1 = idx+d*n
       kd = self.group.dual(k)
@@ -1025,6 +1027,9 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       vLred = {}
       vRred = {}
       for k,n in Dks.items():
+        if n==0:
+          Dks.pop(k)
+          continue
         sortable = ws[k] if herm else -np.abs(ws[k])
         idxsort = np.argsort(sgn*sortable)[:n]
         if reverse:

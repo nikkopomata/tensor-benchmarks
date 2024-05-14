@@ -77,11 +77,15 @@ class MPS(MPSgeneric):
   def getTL(self, n):
     if n == 0:
       return self._matrices[0]
+    if n < 0:
+      n = self.N+n
     return self._matrices[n].diag_mult('l',self._schmidt[n-1])
 
   def getTR(self, n):
     if n == self._Nsites-1:
       return self._matrices[n]
+    if n < 0:
+      n = self.N+n
     return self._matrices[n].diag_mult('r',self._schmidt[n])
 
   def setTL(self, M, n, schmidt=None, unitary=False):

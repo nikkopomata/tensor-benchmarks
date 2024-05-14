@@ -1762,7 +1762,7 @@ class DMRGOrthoManager(DMRGManager):
           j0,l0,r0 = j,l,r
       if j0 < self.npsis-1:
         rv += f'-{self.npsis-1}'
-      rv += f'>{l0}L{r0}R {"P" if statespec[i,j,0] else "X"}'
+      rv += f'>{l0}L{r0}R {"P" if statespec[i,-1,0] else "X"}'
     return rv
     
   def ROstatelist(self, statespec):
