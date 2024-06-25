@@ -779,8 +779,11 @@ class DMRGManager:
   def checkdatabase(self):
     self.logger.debug('Checking database and restoring entries as necessary')
     if self.dbpath:
-      if not self.database:
+      if not isinstance(self.database,PseudoShelf):
         self.database = PseudoShelf(self.dbpath)
+      elif not os.path.isdir(self.dbpath):
+        self.logger.warning('Directory %s not found; creating',self.dbpath)
+        os.mkdir(self.dbpath)
       dbkeys = self.database.checkentries()
     else:
       dbkeys = set(self.database)
@@ -850,7 +853,7 @@ class DMRGManager:
       # Update history
       self.schmidt0.append(l1)
     
-  def compare2(self, niter):
+  def compare2(self, niter, return_Ediff=False):
     # Schmidt-coefficient difference
     if niter == 0:
       config.streamlog.log(30, 'Double update')
@@ -878,6 +881,8 @@ class DMRGManager:
     self.getE()
     self.logger.log(20, '[%s]  energy diff %s', niter, self.E-self.E0)
     config.streamlog.log(30,f'[% 4d] %10.4g %+10.4g E=%0.10f',niter,Ldiff,self.E-self.E0,self.E)
+    if return_Ediff:
+      return Ldiff,abs(self.E-self.E0)
     return Ldiff
 
   def doubleupdateleft(self):
@@ -1086,8 +1091,8 @@ def doubleOptSupervisor(N, settings, state=None):
     if niter % settings['ncanon2'] == 0:
       yield 'canonical', (True,)
       yield 'righttransf', (2,) #TODO use gauge?
-    diff = yield 'compare2', (niter,)
-    if diff < settings['schmidtdelta']:
+    diff,diffE = yield 'compare2', (niter,True)
+    if diff < settings['schmidtdelta'] or diffE < settings['Edelta']:
       if niter % settings['ncanon2'] != 0:
         yield 'canonical', (True,)
       break
@@ -1204,10 +1209,11 @@ class PseudoShelf(MutableMapping):
   def __delitem__(self, key):
     if key in self._backup_dict:
       del self._backup_dict[key]
-    try:
-      os.remove(self.fname(key))
-    except FileNotFoundError:
-      config.logger.error('Attempted to delete missing database item')
+    else:
+      try:
+        os.remove(self.fname(key))
+      except FileNotFoundError:
+        config.logger.error('Attempted to delete missing database item')
 
   def __iter__(self):
     dirgen = (f[:-2] for f in os.listdir(self.path) if f[-2:] == '.p')

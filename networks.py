@@ -211,8 +211,10 @@ class Network:
     # Update bonds with dictionary as in self._tbonds
     for t in bdict:
       self._tbonds[t].update(bdict[t])
-      for t1,l1 in bdict[t].values():
+      for l0,(t1,l1) in bdict[t].items():
+        #self._tbonds[t1][l1] = (t,l0)
         self._bonded[t].add(t1)
+        #self._bonded[t1].add(t)
 
   def _set_output(self, odict):
     # Update output index names with dictionary as in self._tout
@@ -1195,14 +1197,6 @@ class Network:
       rmem = 0
     # Memory cost for intermediate tensor on right 
     rx = rfree*functools.reduce(int.__mul__, rcont.values())
-    if reorder and rmem+lx > lmem+rx:
-      tree.left,tree.right = tree.right,tree.left
-      tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
-      mem = max(lx,lmem)+rx
-    else:
-      mem = max(rx,rmem)+lx
-    if root:
-      return mem
     cont = {}
     for t1 in (set(lcont.keys()) | set(rcont.keys())) - ltens - rtens:
       cont[t1] = 1
@@ -1210,7 +1204,21 @@ class Network:
         cont[t1] *= lcont[t1]
       if t1 in rcont:
         cont[t1] *= rcont[t1]
-    return mem, lfree*rfree, cont
+    cfree = lfree*rfree
+    cx = cfree*functools.reduce(int.__mul__,cont.values(),1)
+    # Expense is max of:
+    # left contraction phase
+    # right contraction phase (with left contracted tensor in memory)
+    # combined contraction phase
+    if reorder and rmem+lx > lmem+rx:
+      tree.left,tree.right = tree.right,tree.left
+      tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
+      mem = max(rmem,lmem+rx,lx+rx+cx)
+    else:
+      mem = max(lmem,rmem+lx,lx+rx+cx)
+    if root:
+      return max(lfree*rfree,mem)
+    return mem, cfree, cont
 
 
 class SubnetworkView(Network):
