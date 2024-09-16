@@ -15,6 +15,9 @@ def safesvd(matrix):
     except linalg.LinAlgError:
       if i+1<config.svd_retry:
         config.linalg_log.warn('SVD did not converge, retrying (#%d)',i+1)
+    except ValueError as e:
+      config.linalg_log.warning('Failure in SVD: %s',e)
+      break
     else:
       return U, s, Vd
   global numsvd

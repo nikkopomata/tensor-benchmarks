@@ -77,11 +77,15 @@ class MPS(MPSgeneric):
   def getTL(self, n):
     if n == 0:
       return self._matrices[0]
+    if n < 0:
+      n = self.N+n
     return self._matrices[n].diag_mult('l',self._schmidt[n-1])
 
   def getTR(self, n):
     if n == self._Nsites-1:
       return self._matrices[n]
+    if n < 0:
+      n = self.N+n
     return self._matrices[n].diag_mult('r',self._schmidt[n])
 
   def setTL(self, M, n, schmidt=None, unitary=False):
@@ -126,6 +130,7 @@ class MPS(MPSgeneric):
     T = V.diag_mult('l',s)
     for n in range(1,self.N-1):
       T = T.contract(Ms[n],'r-l;~').diag_mult('r',schmidt[n])
+      config.logger.debug('Imposing left-canonical form at site %d',n)
       U,s,V = T.svd('l,b|r,l|r',tolerance=tol)
       Ms[n] = U
       T = V.diag_mult('l',s)
@@ -134,14 +139,18 @@ class MPS(MPSgeneric):
     Ms[-1] = V
     self._rightcanon[-1] = True
     Ntot = np.linalg.norm(s)
+    config.logger.log(5,'Left-canonical form imposed; pulling out norm %0.10g',
+      Ntot)
     schmidt[-1] = s/Ntot
     # Right-canonical sweep
     T = U.diag_mult('r',schmidt[-1])
     for n in range(self.N-2,0,-1):
       T = T.contract(Ms[n],'l-r;~')
+      config.logger.debug('Imposing full canonical form at site %d',n)
       V,s,U = T.svd('b,r|l,r|l',tolerance=tol)
       Ni = np.linalg.norm(s)
       schmidt[n-1] = s/Ni
+      config.logger.log(5,'Pulling out factor %0.10g',Ni)
       Ntot *= Ni
       Ms[n] = V.diag_mult('r',np.power(schmidt[n],-1))
       T = U.diag_mult('r',schmidt[n-1])

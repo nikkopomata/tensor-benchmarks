@@ -779,8 +779,11 @@ class DMRGManager:
   def checkdatabase(self):
     self.logger.debug('Checking database and restoring entries as necessary')
     if self.dbpath:
-      if not self.database:
+      if not isinstance(self.database,PseudoShelf):
         self.database = PseudoShelf(self.dbpath)
+      elif not os.path.isdir(self.dbpath):
+        self.logger.warning('Directory %s not found; creating',self.dbpath)
+        os.mkdir(self.dbpath)
       dbkeys = self.database.checkentries()
     else:
       dbkeys = set(self.database)
@@ -850,7 +853,7 @@ class DMRGManager:
       # Update history
       self.schmidt0.append(l1)
     
-  def compare2(self, niter):
+  def compare2(self, niter, return_Ediff=False):
     # Schmidt-coefficient difference
     if niter == 0:
       config.streamlog.log(30, 'Double update')
@@ -860,8 +863,20 @@ class DMRGManager:
       l1 = self.psi._schmidt[n]
       if isinstance(l0, dict):
         # Dictionary by charge sector
-        viter = self.psi.getbond(n).full_iter()
+        V1 = self.psi.getbond(n)
+        viter = V1.full_iter()
         l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+        G = self.psi[0].group
+        if V1.qprimary and any(G.indicate(k)==-2 for k in l0):
+          for k in list(l1):
+            if G.indicate(k) == -1:
+              kd = G.dual(k)
+              l1[kd] = l1.pop(k)
+        elif V1.qsecond and any(G.indicate(k)==-1 for k in l0):
+          for k in list(l1):
+            if G.indicate(k) == -2:
+              kd = G.dual(k)
+              l1[kd] = l1.pop(k)
         for k in set(l1).intersection(set(l0)):
           Ldiff += adiff(l0[k],l1[k])
         for k in set(l1) - set(l0):
@@ -878,6 +893,8 @@ class DMRGManager:
     self.getE()
     self.logger.log(20, '[%s]  energy diff %s', niter, self.E-self.E0)
     config.streamlog.log(30,f'[% 4d] %10.4g %+10.4g E=%0.10f',niter,Ldiff,self.E-self.E0,self.E)
+    if return_Ediff:
+      return Ldiff,abs(self.E-self.E0)
     return Ldiff
 
   def doubleupdateleft(self):
@@ -1086,8 +1103,8 @@ def doubleOptSupervisor(N, settings, state=None):
     if niter % settings['ncanon2'] == 0:
       yield 'canonical', (True,)
       yield 'righttransf', (2,) #TODO use gauge?
-    diff = yield 'compare2', (niter,)
-    if diff < settings['schmidtdelta']:
+    diff,diffE = yield 'compare2', (niter,True)
+    if diff < settings['schmidtdelta'] or diffE < settings['Edelta']:
       if niter % settings['ncanon2'] != 0:
         yield 'canonical', (True,)
       break
@@ -1204,10 +1221,11 @@ class PseudoShelf(MutableMapping):
   def __delitem__(self, key):
     if key in self._backup_dict:
       del self._backup_dict[key]
-    try:
-      os.remove(self.fname(key))
-    except FileNotFoundError:
-      config.logger.error('Attempted to delete missing database item')
+    else:
+      try:
+        os.remove(self.fname(key))
+      except FileNotFoundError:
+        config.logger.error('Attempted to delete missing database item')
 
   def __iter__(self):
     dirgen = (f[:-2] for f in os.listdir(self.path) if f[-2:] == '.p')
@@ -1762,7 +1780,7 @@ class DMRGOrthoManager(DMRGManager):
           j0,l0,r0 = j,l,r
       if j0 < self.npsis-1:
         rv += f'-{self.npsis-1}'
-      rv += f'>{l0}L{r0}R {"P" if statespec[i,j,0] else "X"}'
+      rv += f'>{l0}L{r0}R {"P" if statespec[i,-1,0] else "X"}'
     return rv
     
   def ROstatelist(self, statespec):

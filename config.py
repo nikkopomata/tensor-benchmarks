@@ -13,6 +13,7 @@ STACK = 0
 degen_tolerance = 1e-6
 # Maximum memory
 memcap = None
+correct_memcap = False
 # Ratio of memory to maximum number of elements in tensor to be produced
 memratio = 10
 # Whether output is to be flushed

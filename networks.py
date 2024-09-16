@@ -211,8 +211,10 @@ class Network:
     # Update bonds with dictionary as in self._tbonds
     for t in bdict:
       self._tbonds[t].update(bdict[t])
-      for t1,l1 in bdict[t].values():
+      for l0,(t1,l1) in bdict[t].items():
+        #self._tbonds[t1][l1] = (t,l0)
         self._bonded[t].add(t1)
+        #self._bonded[t1].add(t)
 
   def _set_output(self, odict):
     # Update output index names with dictionary as in self._tout
@@ -453,7 +455,8 @@ class Network:
                   # Will have already been checked
                   continue
                 c = self._conj[t0]^self._conj[t1]^conjs[idxold.index(i1)]
-                matchnew.add((i1, l1, c))
+                # TODO double-check
+                matchnew.add((i1, l1, c^conjs[ii]))
               else:
                 matchold = True
           if matchold:
@@ -474,7 +477,7 @@ class Network:
         for t in self._tset[ti]:
           self._conj[t] = not self._conj[t]
 
-  def derive(self, parsestr, *tensorsadd):
+  def derive(self, parsestr, *tensorsadd,cached=None):
     """Derive a new network from self
     Clauses of parsestr (semicolon-separated) may include:
       |T0.l0,T1.l1,^T2|a,b - mirroring a network
@@ -491,7 +494,8 @@ class Network:
       -T1,T2,T3 - remove nodes indicated
       T0.l0-T1.l1,T2.l3>l, etc - add bonds and output index names
       conclude with # (strict) or ~ (autocomplete) as in Network.network()
-    Returns new network"""
+    Returns new network
+    If cached is not supplied, will use value of parent"""
     if not isinstance(parsestr,str):
       raise ValueError('First argument must be string')
     if not all(isinstance(T, Tensor) for T in tensorsadd):
@@ -680,7 +684,9 @@ class Network:
       for t in tensors:
         tensors[t] = rmap[tensors[t]]
       tlist = [tlist[tmap[i]] for i in range(len(tmap))]
-    net = Network(tlist, tensors, conj)
+    if cached is None:
+      cached = not (self._cache is False)
+    net = Network(tlist, tensors, conj, cached=cached)
     net._set_bonds(bonds)
     net._set_output(out)
     if auto:
@@ -819,7 +825,7 @@ class Network:
       for t,l0 in setout:
         tl = '%s.%s'%(t,l0)
         if tl not in iset:
-          raise KeyError('Tensor.index %s does not represent a free index')
+          raise KeyError('Tensor.index %s does not represent a free index',tl)
         idxmap[tl] = setout[t,l0]
         iset.remove(tl)
       if iset:
@@ -947,8 +953,11 @@ class Network:
       return
     tenl = tuple(sorted(tensors))
     if config.memcap:
-      # TODO divide by itemsize after checking for issues
-      memcap = int(config.memcap//config.memratio)
+      # TODO depricate original (no itemsize) after checking for issues
+      if config.correct_memcap:
+        memcap = int(config.memcap//(config.memratio*np.dtype(config.FIELD).itemsize))
+      else:
+        memcap = int(config.memcap//config.memratio)
     else:
       memcap = None
     stepexp = []
@@ -1188,14 +1197,6 @@ class Network:
       rmem = 0
     # Memory cost for intermediate tensor on right 
     rx = rfree*functools.reduce(int.__mul__, rcont.values())
-    if reorder and rmem+lx > lmem+rx:
-      tree.left,tree.right = tree.right,tree.left
-      tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
-      mem = max(lx,lmem)+rx
-    else:
-      mem = max(rx,rmem)+lx
-    if root:
-      return mem
     cont = {}
     for t1 in (set(lcont.keys()) | set(rcont.keys())) - ltens - rtens:
       cont[t1] = 1
@@ -1203,7 +1204,21 @@ class Network:
         cont[t1] *= lcont[t1]
       if t1 in rcont:
         cont[t1] *= rcont[t1]
-    return mem, lfree*rfree, cont
+    cfree = lfree*rfree
+    cx = cfree*functools.reduce(int.__mul__,cont.values(),1)
+    # Expense is max of:
+    # left contraction phase
+    # right contraction phase (with left contracted tensor in memory)
+    # combined contraction phase
+    if reorder and rmem+lx > lmem+rx:
+      tree.left,tree.right = tree.right,tree.left
+      tree._ldepth,tree._rdepth = tree._rdepth,tree._ldepth
+      mem = max(rmem,lmem+rx,lx+rx+cx)
+    else:
+      mem = max(lmem,rmem+lx,lx+rx+cx)
+    if root:
+      return max(lfree*rfree,mem)
+    return mem, cfree, cont
 
 
 class SubnetworkView(Network):

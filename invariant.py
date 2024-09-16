@@ -9,6 +9,9 @@ from . import links,config,tensors,groups
 from .groups import Group,GroupDerivedType,SumRepresentation
 from .tensors import Tensor,FusionPrimitive,_endomorphic,_eig_vec_process
 
+# Avoid substantiating for contractions
+insubstantiate = False
+
 # TODO do InvariantFusion + SubstantiatingFusion need to be pickleable?
 class InvariantFusion(FusionPrimitive,metaclass=GroupDerivedType):
   """Determine fusion for indices invariant under group action
@@ -566,7 +569,7 @@ class GroupTensor(Tensor,metaclass=GroupDerivedType):
         if not (conj and T2._irrep == self._irrep) and not (not conj and T2._irrep == self.group.dual(self._irrep)):
           raise NotImplementedError('Contraction of non-dual charged tensors'
             ' not yet implemented')
-        if self.group.dim(self._irrep) != 1:
+        if not insubstantiate and self.group.dim(self._irrep) != 1:
           # TODO more efficient contraction of higher-rank tensors?
           contracted.append(('.','.'))
           return Tensor._do_contract(self.substantiate('.'),
@@ -989,6 +992,8 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     reverse = ('reverse' in kw_args and kw_args['reverse'])
     for k,n in VL:
       # k is from left index symmetry => irrep of right eigenvectors
+      if n == 0:
+        continue
       d = self.group.dim(k)
       idx1 = idx+d*n
       kd = self.group.dual(k)
@@ -1025,6 +1030,9 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       vLred = {}
       vRred = {}
       for k,n in Dks.items():
+        if n==0:
+          Dks.pop(k)
+          continue
         sortable = ws[k] if herm else -np.abs(ws[k])
         idxsort = np.argsort(sgn*sortable)[:n]
         if reverse:
@@ -1157,6 +1165,8 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
     if d == 1:
       T = np.expand_dims(self._T, self.rank)
       return self.group.Tensor(T,self._idxs+(idx,),self._spaces+(vnew,))
+    config.linalg_log.log(5,'Substantiating intertwiner of irrep %s (dim %d) '
+      'with %d elements\n(shape %s)',k0,d,self.numel,self.dshape)
     M, f = self._do_fuse((0,self._idxs))
     MT = M._T
     Msub = np.zeros(MT.shape+(d,),dtype=config.FIELD)
