@@ -21,7 +21,9 @@ sqrthalf = np.sqrt(REALTYPE(.5))
 # Matrix exponential accurate for high precision
 n_expm128 = 10
 eps_128 = 1e-30
-theta_n_expm128 = (eps_128*np.math.factorial(n_expm128))**(1/n_expm128)
+# TODO check what happened to np.math
+import math
+theta_n_expm128 = (eps_128*math.factorial(n_expm128))**(1/n_expm128)
 # Try to make matrix of order 1, to avoid squaring error
 n_expm128 = 21
 theta_n_expm128 = 1
