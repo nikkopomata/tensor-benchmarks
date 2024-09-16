@@ -863,8 +863,20 @@ class DMRGManager:
       l1 = self.psi._schmidt[n]
       if isinstance(l0, dict):
         # Dictionary by charge sector
-        viter = self.psi.getbond(n).full_iter()
+        V1 = self.psi.getbond(n)
+        viter = V1.full_iter()
         l1 = {k:l1[idx:idx+d*degen:d] for k,degen,d,idx in viter}
+        G = self.psi[0].group
+        if V1.qprimary and any(G.indicate(k)==-2 for k in l0):
+          for k in list(l1):
+            if G.indicate(k) == -1:
+              kd = G.dual(k)
+              l1[kd] = l1.pop(k)
+        elif V1.qsecond and any(G.indicate(k)==-1 for k in l0):
+          for k in list(l1):
+            if G.indicate(k) == -2:
+              kd = G.dual(k)
+              l1[kd] = l1.pop(k)
         for k in set(l1).intersection(set(l0)):
           Ldiff += adiff(l0[k],l1[k])
         for k in set(l1) - set(l0):

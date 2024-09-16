@@ -661,7 +661,7 @@ class MPOgeneric:
       else:
         d = None
       for ss,M in p.items():
-        if isinstance(ss,tuple):
+        if isinstance(ss,tuple) and len(ss) == 2:
           # Event which changes state
           sl,sr = ss
         else:
@@ -726,8 +726,8 @@ class MPOgeneric:
     for n in range(nproc):
       if states_left[n] != states_right[n-1]:
         # TODO non-periodic case of n=0
-        diffl = states_left[n]-states_right[n-1]
-        diffr = states_right[n-1]-states_left[n]
+        diffr = states_left[n]-states_right[n-1]
+        diffl = states_right[n-1]-states_left[n]
         if diffl and diffr:
           raise ValueError(f'Virtual states on bond between {n-1}-{n} differ: {diffl} on left only, {diffr} on right only')
         elif diffl:
@@ -802,7 +802,7 @@ class MPOgeneric:
       trans[idxl[final],idxr[final]] = 1
       # Iterate over events
       for ss,mat in proc.items():
-        if isinstance(ss,tuple):
+        if isinstance(ss,tuple) and len(ss)==2:
           sl,sr = ss
         else:
           sl,sr = ss,ss
