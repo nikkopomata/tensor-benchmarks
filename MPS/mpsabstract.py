@@ -272,6 +272,7 @@ class MPSgeneric(ABC):
     return np.sum(-p*np.log(p))
 
   def rectifyleft(self, n0, nf, tol=None):
+    """Move orthogonality center n0->nf"""
     N = self.N
     if config.verbose >= config.VDEBUG:
       self.printcanon() #DEBUG
@@ -296,6 +297,7 @@ class MPSgeneric(ABC):
     return U0
 
   def rectifyright(self, n0, nf, tol=None):
+    """Move orthogonality center nf<-n0"""
     N = self.N
     if config.verbose >= config.VDEBUG:
       self.printcanon() #DEBUG
@@ -641,6 +643,8 @@ class MPOgeneric:
     allstates = {initial,final} # All bond states encountered
     statedims = {} # States with dimension > 1
     Vphys = [] # VSpaces for physical indices
+    if not isinstance(missing_phys,dict):
+      missing_phys = {n:missing_phys for n in range(nproc)}
     # First iteration over processes:
     # identify information about physical spaces & collect virtual states
     for n,p in enumerate(processes):
@@ -701,11 +705,16 @@ class MPOgeneric:
       # If information is not complete:
       if d is None:
         # Get from missing_phys
-        assert n in missing_phys
-        if isinstance(missing_phys[n],links.VSAbstract):
-          Vp = missing_phys[n]
+        if n in missing_phys:
+          mp = missing_phys[n]
+        elif 'default' in missing_phys:
+          mp = missing_phys['default']
         else:
-          d = missing_phys[n]
+          raise KeyError(f'No physical space or dimension provided for site {n}')
+        if isinstance(mp,links.VSAbstract):
+          Vp = mp
+        else:
+          d = mp
       if Vp is None:
         # Have dimension but not space: make one
         if n in missing_phys and isinstance(missing_phys[n],links.VSAbstract):
@@ -719,8 +728,8 @@ class MPOgeneric:
     for n in range(nproc):
       if states_left[n] != states_right[n-1]:
         # TODO non-periodic case of n=0
-        diffl = states_left[n]-states_right[n-1]
-        diffr = states_right[n-1]-states_left[n]
+        diffr = states_left[n]-states_right[n-1]
+        diffl = states_right[n-1]-states_left[n]
         if diffl and diffr:
           raise ValueError(f'Virtual states on bond between {n-1}-{n} differ: {diffl} on left only, {diffr} on right only')
         elif diffl:
@@ -931,8 +940,12 @@ class MPOgeneric:
 
   def DMRG_opt_single(self, psi, n, TL, TR, right, gL=None, gR=None, tol=None,
       eigtol=None):
-    assert (TL.site - (n-1))%self.N == 0
-    assert (TR.site - (n+1))%self.N == 0
+    if (TL.site - (n-1))%self.N != 0:
+      raise ValueError(f'Left transfer at invalid site {TL.site} '
+        f'({TL.site%self.N} mod {self.N} but should be {(n-1)%self.N})')
+    if (TR.site - (n+1))%self.N != 0:
+      raise ValueError(f'Right transfer at invalid site {TR.site} '
+        f'({TR.site%self.N} mod {self.N} but should be {(n+1)%self.N})')
     if config.verbose > 3:
       print('Optimizing site',n%self.N)
     if gL is not None and gR is None:
@@ -981,8 +994,12 @@ class MPOgeneric:
     # TODO can we optimize the truncation better than naive svd?
     # Starting tensor guess
     # Incorporate Schmidt coefficients on either side
-    assert (TL.site - (n-1))%self.N == 0
-    assert (TR.site - (n+2))%self.N == 0
+    if (TL.site - (n-1))%self.N != 0:
+      raise ValueError(f'Left transfer at invalid site {TL.site} '
+        f'({TL.site%self.N} mod {self.N} but should be {(n-1)%self.N})')
+    if (TR.site - (n+2))%self.N != 0:
+      raise ValueError(f'Right transfer at invalid site {TR.site} '
+        f'({TR.site%self.N} mod {self.N} but should be {(n+2)%self.N})')
     if config.verbose > 3:
       print(f'Optimizing sites {n%self.N}-{(n+1)%self.N}')
     if (Ulr is None) or right:
@@ -1163,7 +1180,7 @@ class LeftTransfer(TransferMatrix):
       return ';'.join(tens+[bondv+','+bondh,outstr])
 
   def checkcanon(self):
-    config.logger.log(8,'Applying transfer matrix to left of site %d',self.site)
+    config.logger.log(15,'Applying transfer matrix to left of site %d',self.site)
     if self._strict and not (self.bra._leftcanon[self.site%self.psi.N] and self.ket._leftcanon[self.site%self.psi.N]):
       raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
 
@@ -1211,7 +1228,7 @@ class LeftTransfer(TransferMatrix):
     assert self._psi2 is None
     assert self.depth == 1 and self._psi2 is None
     O = self.operators[0]
-    assert (self.site+1)%O.N == 0
+    #assert (self.site+1)%O.N == 0
     if self._schmidtdir == 'r':
       T = self.T
     else:
@@ -1345,7 +1362,7 @@ class RightTransfer(TransferMatrix):
     # Subtract out accrued multiples of terminal condition
     assert self.depth == 1
     O = self.operators[0]
-    assert self.site%O.N == 0
+    #assert self.site%O.N == 0
     if self._schmidtdir == 'l':
       T = self.T
     else:

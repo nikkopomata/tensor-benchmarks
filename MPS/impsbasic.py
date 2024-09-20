@@ -306,23 +306,24 @@ class iMPS(MPSgeneric):
           abs(matR[n-1].diag_mult('r',dr[n]).contract(matL[n],'r-l;~;~')-sold))
     return mats
 
+  def iscanon(self):
+    return all(self._leftcanon) and all(self._rightcanon)
+
   def restore_canonical(self, transf_degen_tol=1e-8, tol=None, gauge=False,
       almost_canon=False):
     # TODO look into whether transf_degen_tol should be lower/higher
     # TODO "gentler" version for when already "almost" canonical?
     N = self._Nsites
+    logger = config.logger
     if almost_canon:
       try:
         return self.restore_canonical_stabilized(transf_degen_tol=transf_degen_tol, tol=tol)
       except Exception as e:
-        if config.verbose:
-          print('Stabilized restore_canonical failed; falling back')
-          traceback.print_exc()
-          # DEBUG
-          if config.verbose >= config.VDEBUG:
-            s = input('Continue? y/n ')
-            if s != 'y':
-              sys.exit()
+        logger.exception('Stabilized restore_canonical failed; falling back')
+        #if config.verbose >= config.VDEBUG:
+        #  s = input('Continue? y/n ')
+        #  if s != 'y':
+        #    sys.exit()
     if gauge:
       matL = [T.id_from('l:l-r',T) for T in self._matrices]
       matR = [T.id_from('r:r-l',T) for T in self._matrices]
@@ -340,6 +341,7 @@ class iMPS(MPSgeneric):
       *[self.getTL(n) for n in range(N)],
       order='L,'+','.join(ords), adjoint_order='L,'+','.join(ords[::-1]))
     guess = self.getTc(0).id_from('l:b-t',self.getTc(0))
+    logger.debug('Finding dominant transfer-matrix eigenvalues')
     w,v = transfnet.eigs(keig,which='LM',guess=guess,herm=False)
     # TODO increase keig as necessary
     lidx = np.argmax(np.real(w))
@@ -352,21 +354,25 @@ class iMPS(MPSgeneric):
     if ndegen == 1:
       # Effectively nondegenerate
       # Normalize/phase-correct to trace-1
+      logger.debug('Transfer matrix non-degenerate to within %0.2e',
+        transf_degen_tol)
       Ptot = vmask[0]/vmask[0].trace('t-b')
     else:
-      if config.verbose:
-        print('transfer degeneracy (left)', ndegen)
+      logger.info('(Left) transfer matrix has %d-fold degeneracy',
+        ndegen)
       Ptot = positive_contribution(vmask, transf_degen_tol)
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
+    logger.debug('Left steady state: Hermitian to within %0.2g, '
+      'min eigenvalue %+0.2g',abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      print('Failure in restore_canonical:')
-      print('  positive-semidefinite transfer-matrix eigenvector not found') 
+      logger.error('Failure in restore_canonical:\n'
+        '\tpositive-semidefinite transfer-matrix eigenvector not found')
       return mats
     if min(wcheck) < -transf_degen_tol**2:
-      print('Failure to obtain positive-semidefinite transfer-matrix'
-            ' eigenvector at "non-critical" threshold')
+      logger.warning('Failure to obtain positive-semidefinite '
+        'transfer-matrix eigenvector at "non-critical" threshold')
     # Move max eigenvector through the unit cell
     Ptots = self.lefttransfers(Ptot, 0, 'l')
     # Re-normalization to compensate for Schmidt-vector normalization
@@ -380,18 +386,21 @@ class iMPS(MPSgeneric):
       w,U = Ptots[n].T.eig('t-b',mat=True,zero_tol=tol,reverse=True)
       U = U.renamed('c-l,t-r')
       schmidt = np.sqrt(np.abs(w))
-      schmidt /= np.linalg.norm(schmidt)
+      snorm = np.linalg.norm(schmidt)
+      schmidt /= snorm
       s_old = self.getschmidt(n-1)
       Ul,Ur = self.regauge_left(n, U, schmidt, sameside=False)
       self._matrices[n] /= nmlz
       if gauge:
         matR[n-1] = Ul
         matL[n] = Ur/nmlz
-    for n in range(N):
-      TL = self.getTL(n)
-      X = TL.contract(TL,'b-b,l-l;r>t;r>b*')
-      p = X.trace('t-b')
-      d = X.dshape['t']
+      logger.debug('Left-canonical site %d: normalization factors '
+        '%0.6f external, %0.6f internal', n, nmlz, snorm)
+    #for n in range(N):
+    #  TL = self.getTL(n)
+    #  X = TL.contract(TL,'b-b,l-l;r>t;r>b*')
+    #  p = X.trace('t-b')
+    #  d = X.dshape['t']
     self._leftcanon = N*[True]
     # Right transfer eigenvectors
     # TODO this is messy
@@ -407,8 +416,10 @@ class iMPS(MPSgeneric):
     degen = np.abs(np.array(w)/abs(lam2) - 1) < transf_degen_tol
     ndegen2 = sum(degen)
     wmask,vmask = list(compress(w,degen)),list(compress(v,degen))
-    if ndegen2 != ndegen and config.verbose:
-      print(f'Degeneracy changed {ndegen}->{ndegen2} for right transfer, ratio {abs(w[-1]/lam2-1):0.1g} (compare {transf_degen_tol:0.1g}') 
+    if ndegen2 != ndegen:
+      logger.error('Degeneracy changed %d->%d for right transfer, ratio '
+        '%0.2g (compare %0.1g)',ndegen,ndegen2,abs(w[-1]/lam2-1),
+        transf_degen_tol)
     if ndegen2 == 1:
       # Effectively nondegenerate: normalize/phase-correct
       Ptot = vmask[0]/vmask[0].trace('t-b')
@@ -416,14 +427,16 @@ class iMPS(MPSgeneric):
       Ptot = positive_contribution(vmask, transf_degen_tol)
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
+    logger.debug('Right steady state: Hermitian to within %0.2g, '
+      'min eigenvalue %+0.2g',abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      print('Failure in restore_canonical:')
-      print('  positive-semidefinite transfer-matrix eigenvector not found') 
+      logger.error('Failure in restore_canonical:\n'
+        '\tpositive-semidefinite transfer-matrix eigenvector not found')
       return mats
     if min(wcheck) < -transf_degen_tol**2:
-      print('Failure to obtain positive-semidefinite transfer-matrix'
-            ' eigenvector at "non-critical" threshold')
+      logger.warning('Failure to obtain positive-semidefinite '
+        'transfer-matrix eigenvector at "non-critical" threshold')
     Ptots = self.righttransfers(Ptot, 0, 'l')
     probs = [M.T.trace('t-b') for M in Ptots]
     renorms = [probs[(i+1)%N]/probs[i] for i in range(N)]
@@ -436,24 +449,28 @@ class iMPS(MPSgeneric):
       w,U = Ptots[k].T.eig('b-t',mat=True,zero_tol=tol,reverse=True)
       U = U.renamed('c-l,b-r')
       schmidt = np.sqrt(np.abs(w))
-      schmidt /= np.linalg.norm(schmidt)
+      snorm = np.linalg.norm(schmidt)
+      schmidt /= snorm
       s_old = self.getschmidt(n)
       Ul,Ur = self.regauge_left(n+1, U, schmidt)
       self._matrices[n+1] /= nmlz
       if gauge:
         matR[N-k-1] = matR[N-k-1].mat_mult('r-l',Ul)
         matL[-k] = matL[-k].mat_mult('l-r',Ur)/nmlz
+      logger.debug('Right-canonical site %d: normalization factors '
+        '%0.6f external, %0.6f internal', n, nmlz, snorm)
     self._rightcanon = N*[True]
     self._leftcanon = N*[True]
     # TODO check gauge matrices fill required purpose
-    if config.verbose >= config.VDEBUG:
-      #DEBUG
-      for n in range(N):
-        TL = self.getTL(n)
-        TR = self.getTR(n)
-        IL = TL.id_from('r:t-b',TL)
-        IR = TR.id_from('l:t-b',TR)
-        print(abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL),abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR))
+    #DEBUG
+    for n in range(N):
+      TL = self.getTL(n)
+      TR = self.getTR(n)
+      IL = TL.id_from('r:t-b',TL)
+      IR = TR.id_from('l:t-b',TR)
+      config.logger.debug('Site %d: left-canonical to %0.2g, right to %0.2g',
+        n, abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL),
+        abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR))
     return mats
 
   def correlationlength(self, tolerance=1e-10):
@@ -515,6 +532,7 @@ class iMPS(MPSgeneric):
     # At most 1 unit cell:
     N = self.N
     dn = (n0-nf-1)%N
+    # TODO since often n0-nf=-1 does this work for both N=2 and N!=2?
     nf = n0-dn-1
     return MPSgeneric.rectifyright(self, n0, nf, tol)
 
@@ -566,6 +584,21 @@ class iMPO(MPOgeneric):
     BCR = Ms[0].init_fromT(BCR,'l|l')
     return iMPO(Ms,BCL,BCR), state_lists
 
+  def Lterm_at(self, site):
+    T = self.Lterm
+    for n in range(site%self.N):
+      O = self._matrices[n]
+      d = O.dshape['b']
+      T = O.contract(T,'l-r;~').trace('b-t')/d
+    return T
+
+  def Rterm_at(self, site):
+    T = self.Rterm
+    for n in range(self.N-1,site%self.N-1,-1):
+      O = self._matrices[n]
+      d = O.dshape['b']
+      T = O.contract(T,'r-l;~').trace('b-t')/d
+    return T
 
   def rand_MPS(self, bonds=None, bond=None):
     if bond:
@@ -631,8 +664,14 @@ class iMPO(MPOgeneric):
     return T
 
   def reset_ltransfer(self, ltransf, U, delta, nmax=10000):
+    # TODO case of psi & H not having same periodicity
+    # TODO faster eigensolver method?
     # Gauge by U
     ltransf.gauge(U)
+    x0 = ltransf.site
+    if (x0+1)%self.N != 0:
+      # Move to origin
+      ltransf = ltransf.moveby((-1-x0)%self.N)
     # Remove accumulator
     ltransf.Ereduce()
     # Normalize by initializer
@@ -650,8 +689,8 @@ class iMPO(MPOgeneric):
       ltransf = ltransf.moveby(self._Nsites)
       El = ltransf.Ereduce()
       diff = abs(ltransf.T-T0)
-      if config.verbose >= config.VDEBUG:
-        print('left transfer convergence',diff,np.real(El/self.N))
+      config.logger.debug(' left transfer convergence [%5d] %0.4e / E %+0.6f',
+        n,diff,np.real(El/self.N))
       if diff < delta:
         break
     return ltransf
@@ -659,6 +698,9 @@ class iMPO(MPOgeneric):
   def reset_rtransfer(self, rtransf, U, delta, nmax=10000):
     # Gauge by U
     rtransf.gauge(U)
+    x0 = rtransf.site
+    if x0%self.N != 0:
+      rtransf = rtransf.moveby(x0%self.N)
     # Remove accumulator
     rtransf.Ereduce()
     # Normalize by initializer
@@ -676,8 +718,8 @@ class iMPO(MPOgeneric):
       rtransf = rtransf.moveby(self._Nsites)
       Er = rtransf.Ereduce()
       diff = abs(rtransf.T-T0)
-      if config.verbose >= config.VDEBUG:
-        print('right transfer convergence',diff,np.real(Er)/self.N)
+      config.logger.debug('right transfer convergence [%5d] %0.4e / E %+0.6f',
+        n,diff,np.real(Er/self.N))
       if diff < delta:
         break
     return rtransf

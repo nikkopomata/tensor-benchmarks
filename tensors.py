@@ -1780,7 +1780,7 @@ class FusionPrimitive:
         v_out = self._spaces_in[0]
       else:
         #d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
-        d = int(np.product([vi.dim for vi in self._spaces_in]))
+        d = int(np.prod([vi.dim for vi in self._spaces_in])) # np.product depricated
         v_out = links.VSpace(d)
     self._out = v_out
 

@@ -1089,7 +1089,9 @@ class ChargedTensor(GroupTensor,metaclass=GroupDerivedType):
 
   def init_fromT(self, T, parsestr, *tensors, **settings):
     if 'irrep' in settings:
-      irrep = settings.pop['irrep']
+      irrep = settings.pop('irrep')
+      if irrep == self.group.triv:
+        return InvariantTensor.derive(self.group).init_from(T, parsestr, self, *tensors, **settings)
     else:
       irrep = self._irrep
     if 'args' in settings:
