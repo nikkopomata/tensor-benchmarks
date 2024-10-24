@@ -181,6 +181,31 @@ class MPS(MPSgeneric):
       rc = abs(TR.contract(TR,'b-b;l>t;l>b*')-IR) < 1e-8
       print('<' if rc else '-')
 
+  def logcanon(self,printlevel=10,complevel=5,thresh=1e-10):
+    rc = map('-<'.__getitem__, self._rightcanon[1:])
+    lc = map('->'.__getitem__, self._rightcanon[:-1])
+    mid = [' |'[self.getbond(n,'r')^self.getbond(n,'l')] for n in range(self.N-1)]
+    canon_logger.log(printlevel, 'canon flags: '+(self.N-1)*'%s%s%s',
+      *sum(zip(lc[1:],mid,rc[:-1]),()))
+    if canon_logger.getEffectiveLevel() <= complevel:
+      rc = []
+      TL = self.getTL(0)
+      IL = TL.id_from('r:t-b',TL)
+      lc = [abs(TL.contract(TL,'b-b;r>t;r>b*')-IL) < thresh]
+      for n in range(1,self.N-1):
+        TL = self.getTL(n)
+        IL = TL.id_from('r:t-b',TL)
+        lc.append(abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL) < thresh)
+        TR = self.getTR(n)
+        IR = TR.id_from('l:t-b',TR)
+        rc.append(abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR) < thresh)
+      TR = self.getTR(self.N-1)
+      IR = TR.id_from('l:t-b',TR)
+      rc.append(abs(TR.contract(TR,'b-b;l>t;l>b*')-IR) < thresh)
+      lc = map('->'.__getitem__,lc)
+      rc = map('-<'.__getitem__,rc)
+      canon_logger.log(complevel, 'canon eval: '+(self.N-1)*'%s%s%s',
+        *sum(zip(rc,lc,mid),()))
   def normsq(self):
     return self.dot(self)
 

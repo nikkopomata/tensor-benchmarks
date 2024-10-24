@@ -11,6 +11,7 @@ import os.path, pickle,sys,uuid, re
 import traceback
 
 keig = 5
+canon_logger = config.logger.getChild('canonical')
 
 def chidependent(chis,*parameters):
   """Convert optionally-chi-dependent parameters into dict
@@ -59,7 +60,8 @@ def positive_contribution(As, tolerance):
   Ptot = Hs[0].zeros_like()
   for H in Hs:
     Ptot += H.trace('t-b')*H
-  return Ptot
+  # TODO was there a justification for not trace-normalizing within routine?
+  return Ptot/Ptot.trace('t-b')
 
 
 class MPSgeneric(ABC):
@@ -274,33 +276,35 @@ class MPSgeneric(ABC):
   def rectifyleft(self, n0, nf, tol=None):
     """Move orthogonality center n0->nf"""
     N = self.N
-    if config.verbose >= config.VDEBUG:
-      self.printcanon() #DEBUG
+    self.logcanon(thresh=1e-14)
     # Convert to left-canonical form
     # Already partially canonical:
     while self._leftcanon[n0%N] and n0<nf:
       n0 += 1
     U0 = None
     for n in range(n0,nf):
-      if config.verbose == config.VDEBUG:
-        print('->',n%N) #DEBUG
+      canon_logger.debug('rectify %d ->',n%N)
       TR = self.getTR(n)
       if U0 is not None:
         TR = TR.mat_mult('l-r',U0)
       TR = TR.diag_mult('l',self.getschmidt(n-1))
       TL,s,U0 = TR.svd('l,b|r,l|r',tolerance=tol)
-      if config.verbose > config.VDEBUG:
-        print('->',n%N,abs(U0-U0.init_like(np.diag(np.diag(U0._T)),'l,r')))
       self.setschmidt(s/np.linalg.norm(s),n,strict=False)
       self.setTL(TL,n,unitary=True)
+      if canon_logger.getEffectiveLevel() <= 5:
+        TL = self.getTL(n)
+        TT = TL.contract(TL,'l-l,b-b;r>t;r>b*')
+        canon_logger.log(5,'deviation %0.4e (off-diagonal %0.4e)',
+          abs(TT-TT.id_like('t-b')),
+          np.linalg.norm(U0._T-np.diag(np.diag(U0._T))))
+      self.logcanon(8,thresh=1e-13)
     # Leaves last site "uncorrected"
     return U0
 
   def rectifyright(self, n0, nf, tol=None):
     """Move orthogonality center nf<-n0"""
     N = self.N
-    if config.verbose >= config.VDEBUG:
-      self.printcanon() #DEBUG
+    self.logcanon(thresh=1e-14)
     # Convert to right-canonical form
     # Already partially canonical:
     while self._rightcanon[(n0-1)%N] and n0>nf:
@@ -308,29 +312,20 @@ class MPSgeneric(ABC):
     U0 = None
     for n in range(n0-1,nf-1,-1):
       TL = self.getTL(n)
-      if config.verbose >= config.VDEBUG:
-        print(n%N,'<-',end=' ') #DEBUG
-        if config.verbose > config.VDEBUG:
-          TR = self.getTR(n)
-          TT = TR.contract(TR,'r-r,b-b;l>t;l>b*')
-          print('deviation',abs(TT-TT.id_like('t-b')))
-        else:
-          print()
+      canon_logger.debug('rectify %d <-',n%N)
       if U0 is not None:
         TL = TL.mat_mult('r-l',U0)
       TL = TL.diag_mult('r',self.getschmidt(n))
       TR,s,U0 = TL.svd('b,r|l,r|l',tolerance=tol)
-      if config.verbose > config.VDEBUG:
-        #print('<-',n%N,abs(U0-U0.init_like(np.diag(np.diag(U0._T)),'l,r')),abs(U0.diag_mult('r',s)-U0.diag_mult('l',s)))
-        UT = U0.permuted(('l','r'))
-        UTf = np.flip(UT,1)
-        D2 = np.diag(np.power(s,2))
-        print('<-',n%N,np.linalg.norm(UT - np.diag(np.diag(UT))),np.linalg.norm(UTf - np.diag(np.diag(UTf))))
-        print('\t',np.linalg.norm(UT.dot(D2)-D2.dot(UT)),np.linalg.norm(UTf.dot(D2)-D2.dot(UTf)))
       self.setschmidt(s/np.linalg.norm(s),n-1,strict=False)
       self.setTR(TR,n,unitary=True)
-      if config.verbose > config.VDEBUG:
-        self.printcanon(True)
+      if canon_logger.getEffectiveLevel() <= 5:
+        TR = self.getTR(n)
+        TT = TR.contract(TR,'r-r,b-b;l>t;l>b*')
+        canon_logger.log(5,'deviation %0.4e (off-diagonal %0.4e)',
+          abs(TT-TT.id_like('t-b')),
+          np.linalg.norm(U0._T-np.diag(np.diag(U0._T))))
+      self.logcanon(8,thresh=1e-13)
     return U0
 
   def tebd_bulk(self, U, chi, n):
@@ -1223,7 +1218,7 @@ class LeftTransfer(TransferMatrix):
         Tl.discard = True
       return Tl
 
-  def Ereduce(self):
+  def Ereduce(self, reset=True):
     # Subtract out accrued multiples of terminal condition
     assert self._psi2 is None
     assert self.depth == 1 and self._psi2 is None
@@ -1234,21 +1229,13 @@ class LeftTransfer(TransferMatrix):
     else:
       schmidt = self.psi.getschmidt(self.site)
       T = self.T.diag_mult('t',schmidt).diag_mult('b',schmidt)
-    bid = T.id_from('t-b',T)
     dE = T.trace('t-b').contract(O.Rboundary,'c-l')
-    if self._schmidtdir == 'r':
-      bid = bid.diag_mult('t',np.power(schmidt,2))
-    dT = bid.contract(O.Lterm, f';~;r>c')
-    self.T -= dE*dT
-    if config.verbose >= config.VDEBUG:
-      # Check calculation
+    if reset:
+      bid = T.id_from('t-b',T)
       if self._schmidtdir == 'r':
-        T = self.T
-      else:
-        schmidt = self.psi.getschmidt(self.site)
-        T = self.T.diag_mult('t',schmidt).diag_mult('b',schmidt)
-      dE0 = T.trace('t-b').contract(O.Rboundary,f'c-l')
-      print('check E reduction: (l)',dE0)#DEBUG
+        bid = bid.diag_mult('t',np.power(schmidt,2))
+      dT = bid.contract(O.Lterm, f';~;r>c')
+      self.T -= dE*dT
     return dE
     
   def initializer(self):
@@ -1314,7 +1301,7 @@ class RightTransfer(TransferMatrix):
   def checkcanon(self):
     config.logger.log(8,'Applying transfer matrix to right of site %d',self.site)
     if self._strict and not (self.bra._rightcanon[self.site%self.psi.N] and self.ket._rightcanon[self.site%self.psi.N]):
-      raise ValueError(f'strictly-enforced transfer matrix requires left-canonical: site {self.site%self.psi.N}')
+      raise ValueError(f'strictly-enforced transfer matrix requires right-canonical: site {self.site%self.psi.N}')
 
   def setstrict(self):
     assert self._schmidtdir == 'r'
@@ -1358,7 +1345,7 @@ class RightTransfer(TransferMatrix):
         Tl.discard = True
       return Tl
 
-  def Ereduce(self):
+  def Ereduce(self,reset=True):
     # Subtract out accrued multiples of terminal condition
     assert self.depth == 1
     O = self.operators[0]
@@ -1368,20 +1355,13 @@ class RightTransfer(TransferMatrix):
     else:
       schmidt = self.psi.getschmidt(self.site-1)
       T = self.T.diag_mult('t',schmidt).diag_mult('b',schmidt)
-    bid = T.id_from('t-b',T)
     dE = T.trace(f't-b').contract(O.Lboundary,f'c-r')
-    if self._schmidtdir == 'l':
-      bid = bid.diag_mult(self.idxs[0],np.power(schmidt,2))
-    dT = bid.contract(O.Rterm, f';~;l>c')
-    self.T -= dE*dT
-    if config.verbose >= config.VDEBUG:
-      # Check calculation
+    if reset:
+      bid = T.id_from('t-b',T)
       if self._schmidtdir == 'l':
-        T = self.T
-      else:
-        schmidt = self.psi.getschmidt(self.site-1)
-        T = self.T.diag_mult('t',schmidt).diag_mult('b',schmidt)
-      print('Check E reduction (r)',T.trace(f't-b').contract(O.Lboundary,f'c-r'))
+        bid = bid.diag_mult(self.idxs[0],np.power(schmidt,2))
+      dT = bid.contract(O.Rterm, f';~;l>c')
+      self.T -= dE*dT
     return dE
     
   def initializer(self):

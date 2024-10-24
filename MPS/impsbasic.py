@@ -45,6 +45,7 @@ class iMPS(MPSgeneric):
     self._Nsites = N
     self._leftcanon = N*[False]
     self._rightcanon = N*[False]
+    self._transfer_degen = None
     if schmidt:
       assert len(schmidt) == N
       self._schmidt = list(schmidt)
@@ -61,6 +62,8 @@ class iMPS(MPSgeneric):
     psi = iMPS(list(self._matrices),list(self._schmidt))
     psi._leftcanon = list(self._leftcanon)
     psi._rightcanon = list(self._rightcanon)
+    if hasattr(self, '_transfer_degen'):
+      psi._transfer_degen = self._transfer_degen
     return psi
 
   def issite(self, n):
@@ -92,64 +95,17 @@ class iMPS(MPSgeneric):
   def rgauge(self, U, n, unitary=True):
     MPSgeneric.rgauge(self, U, n%self._Nsites, unitary)
 
-  def regauge_left(self, n, U, s, sameside=True, unitary=True):
-    # Apply gauge transformation to the left of the Schmidt matrix
-    # sameside=True:
-    # T[n-1]--old_s--T[n] => T[-]*U^d -- s -- s^-1*U*old_s*T[+]
-    # sameside=False:
-    # T[n-1]--old_s--T[n] => T[-]*U^d*s^-1 -- s -- U*old_s*T[+]
-    # TODO general names for U indices?
-    if unitary:
-      Ud = U.conj().renamed('l-r,r-l')
-    else:
-      Ud = U.inv('l-r')
-    old_schmidt = self.getschmidt(n-1)
-    if sameside:
-      Ul = Ud
-      self.setTc(self.getTc(n-1).mat_mult('r-l',Ud), n-1)
-      self.setschmidt(s, n-1)
-      Ur = U.diag_mult('r',old_schmidt).diag_mult('l',np.power(s,-1))
-    else:
-      # T[-]*U^d defines "right-canonical" form at n-1
-      Ul = Ud.diag_mult('r',np.power(s,-1))
-      self.setTR(self.getTc(n-1).mat_mult('r-l',Ud), n-1, s)
-      Ur = U.diag_mult('r',old_schmidt)
-    self.setTc(self.getTc(n).mat_mult('l-r',Ur), n)
-    # TODO check these are the right matrices
-    return Ul,Ur
-
-  def regauge_right(self, n, U, s, sameside=True, unitary=True):
-    # Apply gauge transformation to the right of the Schmidt matrix
-    # sameside=True:
-    # T[n]--old_s--T[n+1] => T[-]*old_s*U*s^-1 -- s -- U^d*T[+]
-    # sameside=False
-    # T[n]--old_s--T[n+1] => T[-]*old_s*U -- s -- s^-1*U^d*T[+]
-    # TODO general names for U indices?
-    # TODO this function is now untested
-    if unitary:
-      Ud = U.conj().renamed('l-r,r-l')
-    else:
-      Ud = U.inv('l-r')
-    old_schmidt = self.getschmidt(n)
-    if sameside:
-      Ur = Ud
-      self.setTc(self.getTc(n+1).mat_mult('r-l',Ud), n+1)
-      self.setschmidt(s, n)
-      Ul = U.diag_mult('l',old_schmidt).diag_mult('r',np.power(s,-1))
-    else:
-      Ur = Ud.diag_mult('l',np.power(s,-1))
-      self.setTL(self.getTc(n+1).mat_mult('l-r',Ud), n+1, s)
-      Ul = U.diag_mult('l',old_schmidt)
-    self.setTc(self.getTc(n).mat_mult('r-l',Ul), n)
-    # TODO check these are the right matrices
-    return Ul,Ur
-
   def restore_canonical_stabilized(self, transf_degen_tol=1e-8, tol=None):
     # "gentler" version for when already "almost" canonical
     # TODO look into whether transf_degen_tol should be lower/higher
     # TODO provide tolerance for deviation at which to use fallback
+    if not hasattr(self, '_transfer_degen') or self._transfer_degen is None:
+      canon_logger.info('Transfer degeneracy not yet determined')
+      return -1
+    ndegen = self._transfer_degen
     N = self._Nsites
     oldschmidts = list(self._schmidt)
+    oldmats = list(self._matrices)
     matL = N*[None]
     matR = N*[None]
     mats = (matL,matR)
@@ -172,17 +128,23 @@ class iMPS(MPSgeneric):
     guess = self.getTc(0).id_from('l:b-t',self.getTc(0))
     w,v = transfnet.eigs(1,which='LM',guess=guess,herm=False)
     lam = np.real(w[0]) # Target eigenvalue
-    assert abs(lam/abs(lam) - 1) < transf_degen_tol # Check phase of lam
+    if abs(lam/abs(lam) - 1) >= transf_degen_tol: # Check phase of lam
+      canon_logger.error('Left transfer matrix eigenvalue %#0.4g%+#0.4g has '
+        'invalid phase', np.real(lam), np.imag(lam))
+      return -1
     # Normalize/phase-correct to trace-1
     Ptot = v[0]/v[0].trace('t-b')
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
+    canon_logger.debug('Left transfer steady state: Hermitian %0.2g, '
+      'min eigenvalue %0.2g', abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      raise ValueError('Positive-semidefinite transfer-matrix eigenvector not found') 
+      canon_logger.error('Positive-semidefinite left transfer-matrix eigenvector not found') 
+      return -1
     if min(wcheck) < -transf_degen_tol**2:
-      print('Failure to obtain positive-semidefinite transfer-matrix'
-            ' eigenvector at "non-critical" threshold')
+      canon_logger.error('Failure to obtain positive-semidefinite '
+        'transfer-matrix eigenvector at "non-critical" threshold')
     # Move max eigenvector through the unit cell
     Ptots = self.lefttransfers(Ptot, 0, 'l')
     # Re-normalization to compensate for Schmidt-vector normalization
@@ -190,22 +152,24 @@ class iMPS(MPSgeneric):
     renorms = [probs[(i+1)%N]/probs[i] for i in range(N)]
     renorms[-1] *= abs(lam)
     nmlz_l = np.sqrt(np.abs(renorms))
-    if config.verbose >= config.VDEBUG: # DEBUG
-      print('Deviation from normalization via left transfer eigenvalue:',
-        abs(lam-1))
-      print('Total deviation from overall normalization:',sum(abs(nm-1) for nm in renorms))
+    canon_logger.debug('Deviation from normalization via left transfer '
+      'eigenvalue: %0.4g\nTotal overall deviation %0.4g', abs(lam-1),
+      sum(abs(nm-1) for nm in renorms))
     # Intermediate matrices
     matrices = [self.getTL(n) for n in range(N)]
     # Use max eigenvectors to obtain left-canonical form
     for n in range(N):
-      if config.verbose >= config.VDEBUG: #DEBUG
-        print(f'site {n}, left: compare identity with {abs(Ptots[n].T - Ptots[n].T.id_like("t-b")/self.getchi(n-1)):0.5g}')
-      w,U = Ptots[n].T.eig('t-b',mat=True,zero_tol=tol,reverse=True)
+      canon_logger.log(8,'site %d, left: compare identity with %0.5g',
+        n, abs(Ptots[n].T - Ptots[n].T.id_like("t-b")/self.getchi(n-1)))
+      w,U = Ptots[n].T.eig('t-b',mat=True,reverse=True)
       Ul[n] = U.renamed('c-l,t-r')
-      assert min(w) > transf_degen_tol # DEBUG?
+      if min(w)/abs(renorms[n]) <= transf_degen_tol: # DEBUG?
+        canon_logger.error('Left transfer vector at %d not sufficiently '
+          'positive (minimum eigenvalue %0.4g)', n, min(w)/abs(renorms[n]))
+        return -1
       dl[n] = np.sqrt(w/sum(w))
       dlinv[n] = np.power(dl[n],-1)
-      s_old = self.getschmidt(n-1)
+      #s_old = self.getschmidt(n-1)
       # -s-T- <- -U^d-1/d- -d- -U-s_old-T-
       M = matrices[n-1].contract(Ul[n],'r-r;~;l>r*')
       matrices[n-1] = M.diag_mult('r',dlinv[n])
@@ -227,17 +191,23 @@ class iMPS(MPSgeneric):
     transfnet = operators.NetworkOperator(netL, 'R', adjoint_order='R,'+','.join(ords))
     w,v = transfnet.eigs(1, which='LM',guess=dmats[-1],herm=False)
     lam2 = np.real(w[0])
-    assert abs(lam2/abs(lam2) - 1) < transf_degen_tol # Check phase of lam
+    if abs(lam2/abs(lam2) - 1) >= transf_degen_tol: # Check phase of lam
+      canon_logger.error('Right transfer matrix eigenvalue %#0.4g%+#0.4g has '
+        'invalid phase', np.real(lam2), np.imag(lam2))
+      return -1
     # Normalize/phase-correct to trace-1
     Ptot = v[0]/v[0].trace('t-b')
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
+    canon_logger.debug('Right transfer steady state: Hermitian %0.2g, '
+      'min eigenvalue %0.2g', abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      raise ValueError('Positive-semidefinite transfer-matrix eigenvector not found') 
+      canon_logger.error('Positive-semidefinite right transfer-matrix eigenvector not found') 
+      return -1
     if min(wcheck) < -transf_degen_tol**2:
-      print('Failure to obtain positive-semidefinite transfer-matrix'
-            ' eigenvector at "non-critical" threshold')
+      canon_logger.error('Failure to obtain positive-semidefinite '
+        'transfer-matrix eigenvector at "non-critical" threshold')
     # Move max eigenvector through the unit cell
     ds = [m.shape['r'] for m in matrices]
     psitemp = iMPS(matrices,dl[1:]+[dl[0]])
@@ -251,21 +221,24 @@ class iMPS(MPSgeneric):
     renorms = [probs[(i+1)%N]/probs[i] for i in range(N)]
     renorms[-1] *= lam2
     nmlz_r = np.sqrt(np.abs(renorms))
-    if config.verbose >= config.VDEBUG: # DEBUG
-      print('Deviation from normalization via right transfer eigenvalue:',
-        abs(lam2-1))
-      print('Total deviation from overall normalization:',sum(abs(nm-1) for nm in renorms))
+    canon_logger.debug('Deviation from normalization via right transfer '
+      'eigenvalue: %0.4g\nTotal overall deviation %0.4g', abs(lam2-1),
+      sum(abs(nm-1) for nm in renorms))
     # Final matrices
     matfin = [self.getTc(n) for n in range(N)]
     # Use max eigenvectors to obtain right-canonical form
     for k in range(N):
       n = (-k)%N
-      w,U = Ptots[k].T.eig('b-t',mat=True,zero_tol=tol,reverse=True)
-      if config.verbose >= config.VDEBUG: #DEBUG
-        print(f'site {n}, right: compare Schmidt with {abs(Ptots[k].T/probs[k] - dmats[n-1]):0.5g}, {np.linalg.norm(np.array(sorted(w))-np.array(sorted(self.getschmidt(n-1)))**2):0.5g}')
+      w,U = Ptots[k].T.eig('b-t',mat=True,reverse=True)
+      canon_logger.log(8,'site %d, right: compare identity with %0.5g, %0.5g',
+        n, abs(Ptots[n].T - Ptots[n].T.id_like("t-b")/self.getchi(n-1)),
+        np.linalg.norm(np.array(sorted(w))-np.array(sorted(self.getschmidt(n-1)))**2))
       Ur[n] = U.renamed('c-l,b-r')
       s_old = self.getschmidt(n-1)
-      assert min(w) > min(s_old)**2 * transf_degen_tol # DEBUG?
+      if min(w) < min(s_old)**2 * transf_degen_tol: # DEBUG?
+        canon_logger.error('Right transfer vector at %d not sufficiently '
+          'positive (minimum eigenvalue %0.4g)', n, min(w)/abs(renorms[n]))
+        return -1
       dr[n] = np.sqrt(w/sum(w))
       # s <- d2
       # -s-T- <- -U1^d-1/d1-U2- -d2- -1/d2-U2^d-d1-U1-s_old-T-
@@ -282,7 +255,7 @@ class iMPS(MPSgeneric):
       matfin[n-1] = matfin[n-1].mat_mult('r-l',mR)
       matfin[n] = matfin[n].mat_mult('l-r',mL)/nmlz_r[k]/nmlz_l[n]
       matR[n-1] = mR
-      matL[n] = mL/nmlz_r[k]/nmlz_l[n]
+      matL[n] = mL#/nmlz_r[k]/nmlz_l[n]
     # Set
     for n in range(N):
       self.setTc(matfin[n],n)
@@ -290,10 +263,8 @@ class iMPS(MPSgeneric):
     self._rightcanon = N*[True]
     self._leftcanon = N*[True]
     # TODO check gauge matrices fill required purpose
-    #if config.verbose >= config.VDEBUG:
-    if config.verbose >= config.VDEBUG:
-      #DEBUG
-      for n in range(N):
+    if canon_logger.getEffectiveLevel() <= 10:
+      for n in range(N): #DEBUG
         TL = self.getTL(n-1)
         TTL = TL.contract(TL,'l-l,b-b;r>b;r>t*')
         TR = self.getTR(n)
@@ -301,9 +272,13 @@ class iMPS(MPSgeneric):
         I = TR.id_from('l:t-b',TR)
         d = TR.shape['l']
         sold = matL[n].id_from('r:r-l',matL[n]).diag_mult('l',oldschmidts[n-1])/nmlz_r[-n]/nmlz_l[n]
-        print(f'check at site {n-1}-{n}:',abs(TTL-I)/d,abs(TTR-I)/d)
-        print('\t',abs(TTL/TTL.trace('t-b')-I/d), abs(TTR/TTR.trace('t-b')-I/d),
-          abs(matR[n-1].diag_mult('r',dr[n]).contract(matL[n],'r-l;~;~')-sold))
+        canon_logger.debug('canonical at %d-%d: left %#0.4g right %#0.4g\n'
+          '\tgauge schmidt %#0.4g matrices %#0.4g',n-1,n,abs(TTL-I)/d,
+          abs(TTR-I)/d,
+          #abs(TTL/TTL.trace('t-b')-I/d),abs(TTR/TTR.trace('t-b')-I/d),
+          #abs(matR[n-1].diag_mult('r',dr[n]).contract(matL[n],'r-l;~;~')-sold))
+          abs(matR[n-1].diag_mult('r',dr[n]).contract(matL[n]/nmlz_r[-n]/nmlz_l[n],'r-l;~;~')-sold),
+          abs(oldmats[n].mat_mult('l-r',matL[n]).mat_mult('r-l',matR[n])/nmlz_l[n]/nmlz_r[-n]-self.getTc(n))/d)
     return mats
 
   def iscanon(self):
@@ -314,16 +289,12 @@ class iMPS(MPSgeneric):
     # TODO look into whether transf_degen_tol should be lower/higher
     # TODO "gentler" version for when already "almost" canonical?
     N = self._Nsites
-    logger = config.logger
     if almost_canon:
-      try:
-        return self.restore_canonical_stabilized(transf_degen_tol=transf_degen_tol, tol=tol)
-      except Exception as e:
-        logger.exception('Stabilized restore_canonical failed; falling back')
-        #if config.verbose >= config.VDEBUG:
-        #  s = input('Continue? y/n ')
-        #  if s != 'y':
-        #    sys.exit()
+      mats = self.restore_canonical_stabilized(transf_degen_tol=transf_degen_tol, tol=tol)
+      if mats is -1:
+        canon_logger.error('Stabilized restore_canonical failed; falling back')
+      else:
+        return mats
     if gauge:
       matL = [T.id_from('l:l-r',T) for T in self._matrices]
       matR = [T.id_from('r:r-l',T) for T in self._matrices]
@@ -341,37 +312,42 @@ class iMPS(MPSgeneric):
       *[self.getTL(n) for n in range(N)],
       order='L,'+','.join(ords), adjoint_order='L,'+','.join(ords[::-1]))
     guess = self.getTc(0).id_from('l:b-t',self.getTc(0))
-    logger.debug('Finding dominant transfer-matrix eigenvalues')
+    canon_logger.debug('Finding dominant transfer-matrix eigenvalues')
     w,v = transfnet.eigs(keig,which='LM',guess=guess,herm=False)
     # TODO increase keig as necessary
     lidx = np.argmax(np.real(w))
     lam = w[lidx] # Target eigenvalue
     assert abs(lam/abs(lam) - 1) < transf_degen_tol # Check phase of lam
     # Degeneracy to handle:
-    degen = np.abs(np.array(w)/abs(lam) - 1) < transf_degen_tol
+    wdiffs = np.abs(np.array(w)/abs(lam) - 1)
+    degen = wdiffs < transf_degen_tol
     ndegen = sum(degen)
+    if hasattr(self, '_transfer_degen') and self._transfer_degen is not None \
+        and self._transfer_degen != ndegen:
+      canon_logger.warning('Degeneracy of transfer matrix changing from '
+        '%d to %d', self._transfer_degen, ndegen)
     wmask,vmask = list(compress(w,degen)),list(compress(v,degen))
     if ndegen == 1:
       # Effectively nondegenerate
       # Normalize/phase-correct to trace-1
-      logger.debug('Transfer matrix non-degenerate to within %0.2e',
-        transf_degen_tol)
+      canon_logger.debug('Transfer matrix non-degenerate to within %0.2e',
+        min(np.delete(wdiffs,lidx)))
       Ptot = vmask[0]/vmask[0].trace('t-b')
     else:
-      logger.info('(Left) transfer matrix has %d-fold degeneracy',
+      canon_logger.info('(Left) transfer matrix has %d-fold degeneracy',
         ndegen)
       Ptot = positive_contribution(vmask, transf_degen_tol)
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
-    logger.debug('Left steady state: Hermitian to within %0.2g, '
+    canon_logger.debug('Left steady state: Hermitian to within %0.2g, '
       'min eigenvalue %+0.2g',abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      logger.error('Failure in restore_canonical:\n'
+      canon_logger.error('Failure in restore_canonical:\n'
         '\tpositive-semidefinite transfer-matrix eigenvector not found')
       return mats
     if min(wcheck) < -transf_degen_tol**2:
-      logger.warning('Failure to obtain positive-semidefinite '
+      canon_logger.warning('Failure to obtain positive-semidefinite '
         'transfer-matrix eigenvector at "non-critical" threshold')
     # Move max eigenvector through the unit cell
     Ptots = self.lefttransfers(Ptot, 0, 'l')
@@ -393,8 +369,8 @@ class iMPS(MPSgeneric):
       self._matrices[n] /= nmlz
       if gauge:
         matR[n-1] = Ul
-        matL[n] = Ur/nmlz
-      logger.debug('Left-canonical site %d: normalization factors '
+        matL[n] = Ur#/nmlz
+      canon_logger.debug('Left-canonical site %d: normalization factors '
         '%0.6f external, %0.6f internal', n, nmlz, snorm)
     #for n in range(N):
     #  TL = self.getTL(n)
@@ -404,7 +380,9 @@ class iMPS(MPSgeneric):
     self._leftcanon = N*[True]
     # Right transfer eigenvectors
     # TODO this is messy
-    transfnet.network.replaceall('L,'+','.join(f'T{n}' for n in range(N)), self.getTc(0).id_from('l:b-t',self.getTc(0)),*[self.getTL(n) for n in range(N)])
+    transfnet.network.replaceall('L,'+','.join(f'T{n}' for n in range(N)),
+      self.getTc(0).id_from('l:b-t',self.getTc(0)),
+      *[self.getTL(n) for n in range(N)])
     netL = transfnet.network.derive(f'-L;+R;R.t-T{N-1}.r,R.b-B{N-1}.r,T0.l>t,B0.l>b',self.getTc(-1).id_from('r:b-t',self.getTc(-1))) # Just use transpose network?
     #netL.replaceall(','.join(f'T{n}' for n in range(N)), *[self.getTR(n) for n in range(N)])
     netL.setorder('R,'+','.join(ords[::-1]))
@@ -413,11 +391,12 @@ class iMPS(MPSgeneric):
       't|l,b|l*',self.getTc(0))
     w,v = transfnet.eigs(keig, which='LM',guess=guess,herm=False)
     lam2 = max(np.real(w))
-    degen = np.abs(np.array(w)/abs(lam2) - 1) < transf_degen_tol
+    wdiffs = np.abs(np.array(w)/abs(lam2) - 1)
+    degen = wdiffs < transf_degen_tol
     ndegen2 = sum(degen)
     wmask,vmask = list(compress(w,degen)),list(compress(v,degen))
     if ndegen2 != ndegen:
-      logger.error('Degeneracy changed %d->%d for right transfer, ratio '
+      canon_logger.error('Degeneracy changed %d->%d for right transfer, ratio '
         '%0.2g (compare %0.1g)',ndegen,ndegen2,abs(w[-1]/lam2-1),
         transf_degen_tol)
     if ndegen2 == 1:
@@ -425,17 +404,18 @@ class iMPS(MPSgeneric):
       Ptot = vmask[0]/vmask[0].trace('t-b')
     else:
       Ptot = positive_contribution(vmask, transf_degen_tol)
+    self._transfer_degen = ndegen2
     # Check result is positive-semidefinite
     wcheck = Ptot.eig('t-b',vecs=False)
-    logger.debug('Right steady state: Hermitian to within %0.2g, '
+    canon_logger.debug('Right steady state: Hermitian to within %0.2g, '
       'min eigenvalue %+0.2g',abs(Ptot-Ptot.ctranspose('t-b')),min(wcheck))
     if abs(Ptot - Ptot.ctranspose('t-b')) > transf_degen_tol or \
         min(wcheck) < -transf_degen_tol:
-      logger.error('Failure in restore_canonical:\n'
+      canon_logger.error('Failure in restore_canonical:\n'
         '\tpositive-semidefinite transfer-matrix eigenvector not found')
       return mats
     if min(wcheck) < -transf_degen_tol**2:
-      logger.warning('Failure to obtain positive-semidefinite '
+      canon_logger.warning('Failure to obtain positive-semidefinite '
         'transfer-matrix eigenvector at "non-critical" threshold')
     Ptots = self.righttransfers(Ptot, 0, 'l')
     probs = [M.T.trace('t-b') for M in Ptots]
@@ -443,7 +423,7 @@ class iMPS(MPSgeneric):
     renorms[-1] *= lam2
     # Use max eigenvectors to obtain right-canonical form
     for k in range(N):
-      n = -k-1
+      n = (-k)%N
       # Normalization factor
       nmlz = np.sqrt(abs(renorms[k]))
       w,U = Ptots[k].T.eig('b-t',mat=True,zero_tol=tol,reverse=True)
@@ -451,26 +431,27 @@ class iMPS(MPSgeneric):
       schmidt = np.sqrt(np.abs(w))
       snorm = np.linalg.norm(schmidt)
       schmidt /= snorm
-      s_old = self.getschmidt(n)
-      Ul,Ur = self.regauge_left(n+1, U, schmidt)
-      self._matrices[n+1] /= nmlz
+      s_old = self.getschmidt(n-1)
+      Ul,Ur = self.regauge_left(n, U, schmidt)
+      self._matrices[n] /= nmlz
       if gauge:
-        matR[N-k-1] = matR[N-k-1].mat_mult('r-l',Ul)
-        matL[-k] = matL[-k].mat_mult('l-r',Ur)/nmlz
-      logger.debug('Right-canonical site %d: normalization factors '
+        matR[n-1] = matR[n-1].mat_mult('r-l',Ul)
+        matL[n] = matL[n].mat_mult('l-r',Ur)#/nmlz
+      canon_logger.debug('Right-canonical site %d: normalization factors '
         '%0.6f external, %0.6f internal', n, nmlz, snorm)
     self._rightcanon = N*[True]
     self._leftcanon = N*[True]
     # TODO check gauge matrices fill required purpose
     #DEBUG
-    for n in range(N):
-      TL = self.getTL(n)
-      TR = self.getTR(n)
-      IL = TL.id_from('r:t-b',TL)
-      IR = TR.id_from('l:t-b',TR)
-      config.logger.debug('Site %d: left-canonical to %0.2g, right to %0.2g',
-        n, abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL),
-        abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR))
+    if canon_logger.getEffectiveLevel() <= 10:
+      for n in range(N):
+        TL = self.getTL(n)
+        TR = self.getTR(n)
+        IL = TL.id_from('r:t-b',TL)
+        IR = TR.id_from('l:t-b',TR)
+        canon_logger.debug('Site %d: left-canonical to %0.2g, right to %0.2g',
+          n, abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL),
+          abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR))
     return mats
 
   def correlationlength(self, tolerance=1e-10):
@@ -520,6 +501,26 @@ class iMPS(MPSgeneric):
         print('>' if lc else '-',end='')
         print(' ' if self.getbond(n,'r')^self.getbond(n,'l') else '|',end='')
       print()
+
+  def logcanon(self,printlevel=10,complevel=5,thresh=1e-10):
+    rc = ['-<'[isc] for isc in self._rightcanon]
+    lc = ['->'[isc] for isc in self._leftcanon]
+    mid = [' |'[self.getbond(n,'r')^self.getbond(n,'l')] for n in range(self.N)]
+    canon_logger.log(printlevel, 'canon flags: '+self.N*'%s%s%s',
+      *sum(zip(rc,lc,mid),()))
+    if canon_logger.getEffectiveLevel() <= complevel:
+      rc = []
+      lc = []
+      for n in range(self.N):
+        TL = self.getTL(n)
+        TR = self.getTR(n)
+        IL = TL.id_from('r:t-b',TL)
+        IR = TR.id_from('l:t-b',TR)
+        rc.append('-<'[abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR) < thresh])
+        lc.append('->'[abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL) < thresh])
+      canon_logger.log(complevel, 'canon eval: '+self.N*'%s%s%s',
+        *sum(zip(rc,lc,mid),()))
+
 
   def rectifyleft(self, n0, nf, tol=None):
     # At most 1 unit cell:

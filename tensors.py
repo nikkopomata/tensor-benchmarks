@@ -1553,12 +1553,13 @@ class Tensor:
           selection = (0, selection-1)
       elif not isinstance(selection, tuple):
         raise ValueError('selection argument must be integer or tuple')
-      nn = selection[1] - selection[0] + 1
-    else:
-      nn = A.shape[0]
+      #nn = selection[1] - selection[0] + 1
+    #else:
+    #  nn = A.shape[0]
     # Diagonalize
     if vecs:
       w,v,vl = _eig_vec_process(A._T, herm, left, selection, reverse, zero_tol)
+      nn = len(w)
       if mat:
         # Process names for eigenvector index
         if isinstance(mat,tuple):
