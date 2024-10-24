@@ -191,6 +191,31 @@ class MPS(MPSgeneric):
       rc = abs(TR.contract(TR,'b-b;l>t;l>b*')-IR) < 1e-8
       print('<' if rc else '-')
 
+  def logcanon(self,printlevel=10,complevel=5,thresh=1e-10):
+    rc = map('-<'.__getitem__, self._rightcanon[1:])
+    lc = map('->'.__getitem__, self._rightcanon[:-1])
+    mid = [' |'[self.getbond(n,'r')^self.getbond(n,'l')] for n in range(self.N-1)]
+    canon_logger.log(printlevel, 'canon flags: '+(self.N-1)*'%s%s%s',
+      *sum(zip(lc[1:],mid,rc[:-1]),()))
+    if canon_logger.getEffectiveLevel() <= complevel:
+      rc = []
+      TL = self.getTL(0)
+      IL = TL.id_from('r:t-b',TL)
+      lc = [abs(TL.contract(TL,'b-b;r>t;r>b*')-IL) < thresh]
+      for n in range(1,self.N-1):
+        TL = self.getTL(n)
+        IL = TL.id_from('r:t-b',TL)
+        lc.append(abs(TL.contract(TL,'l-l,b-b;r>t;r>b*')-IL) < thresh)
+        TR = self.getTR(n)
+        IR = TR.id_from('l:t-b',TR)
+        rc.append(abs(TR.contract(TR,'r-r,b-b;l>t;l>b*')-IR) < thresh)
+      TR = self.getTR(self.N-1)
+      IR = TR.id_from('l:t-b',TR)
+      rc.append(abs(TR.contract(TR,'b-b;l>t;l>b*')-IR) < thresh)
+      lc = map('->'.__getitem__,lc)
+      rc = map('-<'.__getitem__,rc)
+      canon_logger.log(complevel, 'canon eval: '+(self.N-1)*'%s%s%s',
+        *sum(zip(rc,lc,mid),()))
   def normsq(self):
     return self.dot(self)
 
@@ -374,8 +399,13 @@ class MPO(MPOgeneric):
       for s,pin in pinleft.items():
         assert (isinstance(pin,Number) and statedim[s] == 1) or len(pin) == statedim[s]
         BCL[idx0[s]:idx0[s]+statedim[s]] = pin
-    BCR = np.zeros(d0,dtype=config.FIELD)
-    BCR[idx0[final]] = 1
+    df = Ms[-1].shape['r']
+    BCR = np.zeros(df,dtype=config.FIELD)
+    if len(idx_state) == N+1:
+      idxf = idx_state[-1]
+    else:
+      idxf = idx0
+    BCR[idxf[final]] = 1
     if sym: # TODO will be untested
       for idx,(s,k) in enumerate(state_lists[0]):
         if k == group.triv and s in pinright:
@@ -387,7 +417,7 @@ class MPO(MPOgeneric):
     else:
       for s,pin in pinright.items():
         assert (isinstance(pin,Number) and statedim[s] == 1) or len(pin) == statedim[s]
-        BCR[idx0[s]:idx0[s]+statedim[s]] = pin
+        BCR[idxf[s]:idxf[s]+statedim[s]] = pin
     # "Trim" inaccessible virtual states
     trimL = []
     # Indicator for accessible states
@@ -406,8 +436,8 @@ class MPO(MPOgeneric):
       trimR.append(ind != 0)
     assert len(trimL)+len(trimR) < N-1
     # Use BCL, BCR to terminate MPO
-    BCL = Ms[-1].init_fromT(BCL,'r|r')
-    BCR = Ms[0].init_fromT(BCR, 'l|l')
+    BCL = Ms[0].init_fromT(BCL,'r|l*')
+    BCR = Ms[-1].init_fromT(BCR, 'l|r*')
     Ms[0] = Ms[0].contract(BCL, 'l-r;~')
     Ms[-1] = Ms[-1].contract(BCR, 'r-l;~')
     # New virtual spaces
@@ -433,6 +463,366 @@ class MPO(MPOgeneric):
       state_lists[nn] = [state_lists[nn][i] for i,t in enumerate(trim) if t]
       #state_lists[nn] = np.array(state_lists[nn])[trim]
     return MPO(Ms), state_lists[1:]
+
+  @classmethod
+  def FSMinit_restricted(cls, processes, N=None, parities_phys=None,
+      parities_virt=None, init_fin=('i','f'), irreps_virt=None, sreps_virt=None,
+      missing_phys={}, auto_initfin=True, pinleft={},pinright={},**kwargs):
+    """Create MPO from finite-state machine
+    Assumes machine may act trivially at ends and in particular behaves
+      in a way impossible for a periodic machine
+    Processes gives list of statexstate:matrix dictionaries
+      Instead of pair may give just one state (key s is equivalent to (s,s))
+      Instead of matrix may give array (=> diag()) or scalar (=> id,
+        or diag(parity) if fermionic)
+    States may be multidimensional, in which case matrices should be
+      provided with additional nontrivial dimensions
+    If init_fin is provided (default 'i','f'), that is the pair initial, final
+      Otherwise (not init_fin) first element is label for initial state,
+      last element is label for final
+    If auto_initfin (default false) use initial & final states at all sites
+      (at least until trimming step)--similar to periodic behavior
+    If N is provided, will repeat "processes" as necessary
+    If fermionic, will perform Jordan-Wigner automatically:
+      provide parities_phys to list parities (list of lists)
+      for physical indices
+      & parities_virt to identify parities for virtual states
+      (makes JW strings extending to the right; to get correct transformation
+       make sure fermionic operators are written in ascending order)
+    If symmetric, associate each state either with an irrep (in
+      irreps_virt) or lists irreps associated with each state
+      (either as SumRepresentation object or as decomposition list)
+    For finite MPO may provide pinleft and pinright giving boundary ("pinning")
+      value of virtual states
+    missing_phys is either dictionary to physical spaces not otherwise
+      specified or (if all the same) simply the spaces (or dimensions)
+      themselves (if dictionary may also include "default" option)
+    """
+    # TODO collect state transformation info from tensors provided
+    # TODO substantiate from charged tensors
+    # TODO recombine with main method
+    
+    # Identify labels for initial & final states
+    if init_fin:
+      initial,final = init_fin
+    else:
+      initial = processes.pop(0)
+      final = processes.pop()
+    fermionic = (parities_phys is not None)
+    if fermionic:
+      assert parities_virt is not None
+      assert len(processes) % len(parities_phys) == 0
+    nproc = len(processes)
+    if N is None:
+      N = nproc
+    else:
+      assert N%nproc == 0
+    assert N > 1
+    Ms = []
+    states_left = [] # List of enumerated states on the left side of a site
+    states_right = [] # List of enumerated states on the right side
+    state_lists = [] # states_left but without initial & final
+    allstates = {initial,final} # All bond states encountered
+    statedims = {} # States with dimension > 1
+    Vphys = [] # VSpaces for physical indices
+    if not isinstance(missing_phys,dict):
+      missing_phys = {n:missing_phys for n in range(nproc)}
+    # First iteration over processes:
+    # identify information about physical spaces & collect virtual states
+    for n,p in enumerate(processes):
+      # Initialize states_left & states_right entries with initial & final
+      if auto_initfin:
+        left = {initial,final}
+        right = {initial,final}
+      else:
+        left = set()
+        right = set()
+      Vp = None
+      if fermionic:
+        # Know physical dimension from parities_phys
+        d = len(parities_phys[n])
+      else:
+        d = None
+      for ss,M in p.items():
+        if isinstance(ss,tuple):
+          # Event which changes state
+          sl,sr = ss
+        else:
+          # Event which keeps state the same
+          sl,sr = ss,ss
+        left.add(sl)
+        right.add(sr)
+        # Look at action of event to get/verify information about physical space
+        if isinstance(M,tensors.Tensor):
+          idxs = M.idxset
+          assert idxs.issuperset({'t','b'}) and idxs.issubset({'t','b','l','r'})
+          # Directly identifies space 
+          V = M._dspace['b']
+          if Vp is not None:
+            assert V == Vp
+          else:
+            if d is not None:
+              assert d == V.dim
+            else:
+              d = V.dim
+            Vp = V
+          if 'l' in idxs:
+            vdl = M.shape['l']
+            if sl in statedims:
+              assert vdl == statedims[sl]
+            else:
+              statedims[sl] = vdl
+          if 'r' in idxs:
+            vdr = M.shape['r']
+            if sr in statedims:
+              assert vdr == statedims[sr]
+            else:
+              statedims[sr] = vdr
+        elif isinstance(M,np.ndarray) or isinstance(M,list):
+          # Only identifies dimension
+          if d is not None:
+            assert d == len(M)
+          else:
+            d = len(M)
+      allstates.update(left,right) # Add sets of states
+      states_left.append(left)
+      states_right.append(right)
+      if auto_initfin:
+        state_lists.append(list(left-{initial,final}))
+      else:
+        state_lists.append(list(left))
+      # If information is not complete:
+      if d is None:
+        # Get from missing_phys
+        if n in missing_phys:
+          mp = missing_phys[n]
+        elif 'default' in missing_phys:
+          mp = missing_phys['default']
+        else:
+          raise KeyError(f'No physical space or dimension provided for site {n}')
+        if isinstance(mp,links.VSAbstract):
+          Vp = mp
+        else:
+          d = mp
+      if Vp is None:
+        # Have dimension but not space: make one
+        if n in missing_phys and isinstance(missing_phys[n],links.VSAbstract):
+          Vp = missing_phys[n]
+          assert d == Vp.dim
+        else:
+          Vp = links.VSpace(d)
+      Vphys.append(Vp)
+    if auto_initfin:
+      state_lists.append(list(states_right[-1]-{initial,final}))
+    else:
+      state_lists.append(list(states_right[-1]))
+    # Check that states processed at a given site are the same as those
+    # output by the previous one
+    if not states_left[0].issubset({initial} | pinleft.keys()):
+      diff = states_left[0] - {initial} - pinleft.keys()
+      raise ValueError(f'States {diff} at left edge unaccounted for')
+    if not states_right[N-1].issubset({final} | pinright.keys()):
+      diff = states_right[N-1] - {final} - pinright.keys()
+      raise ValueError(f'States {diff} at right edge unaccounted for')
+
+    for n in range(1,nproc):
+      if states_left[n] != states_right[n-1]:
+        diffr = states_left[n]-states_right[n-1]
+        diffl = states_right[n-1]-states_left[n]
+        if diffl and diffr:
+          raise ValueError(f'Virtual states on bond between {n-1}-{n} differ: {diffl} on left only, {diffr} on right only')
+        elif diffl:
+          raise ValueError(f'Virtual states on bond between {n-1}-{n} differ: {diffl} on left only')
+        else:
+          raise ValueError(f'Virtual states on bond between {n-1}-{n} differ: {diffr} on right only')
+    if fermionic:
+      # Parities have been identified for all states given
+      assert allstates == (set(parities_virt.keys()) | {initial,final})
+      if initial not in parities_virt:
+        parities_virt[initial] = False
+      if final not in parities_virt:
+        parities_virt[final] = False
+    symmetric = ((irreps_virt is not None) or (sreps_virt is not None))
+    if symmetric:
+      group = Vphys[0].group
+      if sreps_virt is None:
+        sreps_virt = {}
+      for s,rep in sreps_virt.items():
+        if isinstance(rep,links.VSAbstract):
+          sreps_virt[s] = list(rep._decomp)
+      triv = [(group.triv,1)]
+      sreps_virt.update({initial:triv,final:triv})
+      if irreps_virt is not None:
+        for s,k in irreps_virt.items():
+          if s in sreps_virt:
+            assert sreps_virt[s] == [(k,1)]
+          else:
+            sreps_virt[s] = [(k,1)]
+      for s,rep in sreps_virt.items():
+        d = group.sumdims(rep)
+        if s in statedims and s not in {initial,final}:
+          assert d == statedims[s]
+        else:
+          statedims[s] = d
+      assert set(sreps_virt.keys()) == allstates
+    # Assign indices to states 
+    # initial & final are first & last respectively
+    slfull = []
+    idx_state = []
+    # Current length of state_lists does not account for multidimensional states
+    for n in range(nproc+1):
+      if auto_initfin or initial in state_lists[n]:
+        slf = [initial]
+        inv = {initial:0}
+      for s in state_lists[n]:
+        if s in {initial,final}:
+          continue
+        inv[s] = len(slf)
+        if s in statedims:
+          slf.extend(statedims[s]*[s])
+        else:
+          slf.append(s)
+      if auto_initfin or final in state_lists[n]:
+        inv[final] = len(slf)
+        slf.append(final)
+      slfull.append(slf)
+      idx_state.append(inv)
+    statedimfull = {s:1 for s in allstates}
+    statedimfull.update(statedims)
+    dvirt = [len(slf) for slf in slfull]
+    # Transition/adjacency matrices
+    transition = []
+    # Create matrices
+    for n,proc in enumerate(processes):
+      d = Vphys[n].dim
+      # l t b r
+      M = np.zeros((dvirt[n],dvirt[n+1],d,d),dtype=config.FIELD)
+      # Transition matrix
+      trans = np.zeros((dvirt[n],dvirt[n+1]),dtype=int)
+      # Indexing states on left & right bonds
+      idxl = idx_state[n]
+      idxr = idx_state[n+1]
+      # Initial/final entries
+      if auto_initfin:
+        M[idxl[initial],idxr[initial],:,:] = np.identity(d)
+        M[idxl[final],idxr[final],:,:] = np.identity(d)
+        trans[idxl[initial],idxr[initial]] = 1
+        trans[idxl[final],idxr[final]] = 1
+      # Iterate over events
+      for ss,mat in proc.items():
+        if isinstance(ss,tuple):
+          sl,sr = ss
+        else:
+          sl,sr = ss,ss
+        dl,dr = statedimfull[sl],statedimfull[sr]
+        # Not 1D: Need multi-dimensional tensor *or* maintaned state
+        assert dl == dr or (isinstance(mat,tensors.Tensor) and mat.rank > 2)
+        if fermionic and not isinstance(mat,tensors.Tensor):
+          # Check: w/ trivial, parity, or generally diagonal transformation,
+          # left & right states must have same parity
+          assert parities_virt[sr] == parities_virt[sl]
+        if symmetric and not isinstance(mat,tensors.Tensor):
+          assert sreps_virt[sl] == sreps_virt[sr]
+        if mat is None or mat is False:
+          # Just identity or parity
+          if fermionic and parities_virt[sl]:
+            mat = np.diag(parities_phys[n])
+          else:
+            mat = np.identity(d,dtype=config.FIELD)
+        elif isinstance(mat, Number):
+          # Identity or parity, with coefficient
+          # (may be passed as True, which is 1)
+          if fermionic and parities_virt[sl]:
+            mat = np.diag(mat*parities_phys[n])
+          else:
+            mat = mat*np.identity(d,dtype=config.FIELD)
+        elif not isinstance(mat,tensors.Tensor):
+          if fermionic and parities_virt[sl]:
+            # If fermionic should be parity-conserving
+            mat = np.multiply(mat,parities_phys[n])
+          # Turn into matrix
+          mat = np.diag(np.array(mat,dtype=config.FIELD))
+          if len(mat.shape) != 2:
+            raise ValueError('bare arrays provided must be 1D')
+        else:
+          if fermionic and parities_virt[sl]:
+            # Preceded by odd fermionic terms
+            mat = mat.diag_mult('b',parities_phys[n])
+          if mat.rank > 2:
+            if 'l' in mat:
+              assert mat.shape['l'] == dl
+            else:
+              assert dl == 1
+              matp = np.expand_dims(mat.permuted(('r','t','b')),0)
+            if 'r' in mat:
+              assert mat.shape['r'] == dr
+            else:
+              assert dr == 1
+              matp = np.expand_dims(mat.permuted(('l','t','b')),1)
+            if mat.rank == 4:
+              matp = mat.permuted(('l','r','t','b'))
+            mat = matp
+          else:
+            mat = mat.permuted(('t','b'))
+        if mat.ndim == 2 and (dl != 1 or dr != 1):
+          assert dl == dr
+          mat = np.tensordot(np.identity(dl),mat,0)
+        if mat.ndim == 2:
+          M[idxl[sl],idxr[sr],:,:] = mat
+          trans[idxl[sl],idxr[sr]] = 1
+        else:
+          M[idxl[sl]:idxl[sl]+dl,idxr[sr]:idxr[sr]+dr,:,:] = mat
+          trans[idxl[sl]:idxl[sl]+dl,idxr[sr]:idxr[sr]+dr] = np.any(mat,axis=(2,3))
+      Ms.append(M)
+      transition.append(trans)
+    if symmetric: # Re-order
+      Vvirt = []
+      for n in range(nproc+1):
+        # Build rep list
+        ksegments = defaultdict(list)
+        repall = []
+        idx0 = 0
+        while idx0 < dvirt[n]:
+          s = slfull[n][idx0]
+          for k,m in sreps_virt[s]:
+            dm = m*group.dim(k)
+            ksegments[k].append((s,idx0,idx0+dm))
+            idx0 += dm
+        assert idx0 == dvirt[n]
+        # Collect
+        idx1 = 0
+        idxst2 = {} # Replace inverse dictionary idx_state
+        sl2 = [] # Replace state_lists (will have somewhat different form)
+        lrep = []
+        permuted = np.zeros(dvirt[n],dtype=int)
+        for k in ksegments:
+          idx0 = idx1
+          for s,i0,i1 in ksegments[k]:
+            if s not in idxst2:
+              idxst2[s] = idx1
+            sl2.extend((i1-i0)*[(s,k)])
+            idx2 = idx1+i1-i0
+            permuted[idx1:idx2] = range(i0,i1)
+            idx1 = idx2
+          lrep.append((k,(idx1-idx0)//group.dim(k)))
+        Vvirt.append(group.SumRep(lrep))
+        idx_state[n] = idxst2
+        state_lists[n] = sl2
+        if n:
+          Ms[n-1] = Ms[n-1][:,permuted,:,:]
+          transition[n-1] = transition[n-1][:,permuted]
+        if n<nproc:
+          Ms[n] = Ms[n][permuted,:,:,:]
+          transition[n] = transition[n][permuted,:]
+      tclass = group.Tensor
+    else:
+      Vvirt = [links.VSpace(d) for d in dvirt]
+      state_lists = slfull
+      tclass = tensors.Tensor
+    for n in range(N):
+      Vp = Vphys[n]
+      Ms[n] = tclass.init_from(Ms[n],'l|0*,r|1,t|2*,b|2', Vvirt[n],Vvirt[n+1],Vp)
+    return cls._construct_FSM(Ms, initial, final, transition, idx_state, state_lists, statedimfull, pinleft,pinright,**kwargs)
 
   def rand_MPS(self, bonds=None, bond=None, charge=None):
     if bond:

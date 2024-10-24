@@ -1555,12 +1555,13 @@ class Tensor:
           selection = (0, min(selection,N)-1)
       elif not isinstance(selection, tuple):
         raise ValueError('selection argument must be integer or tuple')
-      nn = selection[1] - selection[0] + 1
-    else:
-      nn = A.shape[0]
+      #nn = selection[1] - selection[0] + 1
+    #else:
+    #  nn = A.shape[0]
     # Diagonalize
     if vecs:
       w,v,vl = _eig_vec_process(A._T, herm, left, selection, reverse, zero_tol)
+      nn = len(w)
       if mat:
         # Process names for eigenvector index
         if isinstance(mat,tuple):
@@ -1782,7 +1783,7 @@ class FusionPrimitive:
         v_out = self._spaces_in[0]
       else:
         #d = functools.reduce(int.__mul__, (vi.dim for vi in self._spaces_in))
-        d = int(np.product([vi.dim for vi in self._spaces_in]))
+        d = int(np.prod([vi.dim for vi in self._spaces_in])) # np.product depricated
         v_out = links.VSpace(d)
     self._out = v_out
 

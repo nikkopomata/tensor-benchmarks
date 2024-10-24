@@ -60,6 +60,8 @@ stdout_handler.setLevel(logging.ERROR)
 stdout_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
 logger.addHandler(stdout_handler)
 def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
+  if level < logger.getEffectiveLevel():
+    logger.setLevel(level)
   handler = logging.FileHandler(logfile,mode=mode)
   formatter = logging.Formatter(fmt=fmtstring, datefmt=datefmt)
   handler.setLevel(level)
@@ -67,6 +69,8 @@ def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
   logger.addHandler(handler)
 def setrotlogging(logfile, fmtstring, level=logging.DEBUG, 
     datefmt=None,mode='a',size=2**26,count=1000):
+  if level < logger.getEffectiveLevel():
+    logger.setLevel(level)
   import logging.handlers
   handler = logging.handlers.RotatingFileHandler(logfile,mode=mode,
     maxBytes=size,backupCount=count)
