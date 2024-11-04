@@ -1,6 +1,6 @@
 from .mpsbasic import *
 from .. import config
-from ..management import GeneralManager,PseudoShelf
+from ..management import GeneralManager,PseudoShelf,safedump
 import os,os.path,shutil
 import pickle,shelve,contextlib,itertools
 import logging
@@ -1270,7 +1270,7 @@ class DMRGOrthoManager(DMRGManager):
         for site in range(1,self.N):
           self._registry[site,'r',ipsi,'p',jpass] = RightTransferManaged(phi,
             site,'r',psi,manager=self)
-    super()._initalizeROs(statespec)
+    super()._initializeROs(statespec)
 
   def _validateROstate(self, spec):
     assert isinstance(spec,np.ndarray)

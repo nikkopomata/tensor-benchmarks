@@ -12,6 +12,8 @@ class GeneralManager:
     self.saveprefix = file_prefix
     if savefile == 'auto' and isinstance(file_prefix,str):
       self.filename = (file_prefix+'.p') if savefile=='auto' else savefile
+    elif savefile == 'auto' or not savefile:
+      self.filename = None
     else:
       self.filename = savefile
 
@@ -248,6 +250,8 @@ class GeneralManager:
     self.supfunctions[name] = func
 
   def save(self):
+    if not self.filename:
+      return
     if self.settings['savesafe']:
       oldfile = self.filename+'.old'
       if os.path.isfile(oldfile):
