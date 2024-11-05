@@ -304,6 +304,9 @@ class DMRGManager(GeneralManager):
       delattr(self, 'transfLs')
       self.__version = '1.0'
     # TODO recovery options if directory is expected but does not exist
+    if self.__version == '1.0':
+      self.settings['savesafe'] = False
+      self.__version = '1.0.1'
     if self.__version == '1.0.1':
       self.settings['tolratio'] = 1
       self.__version = '1.0.2'
