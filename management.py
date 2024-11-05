@@ -64,9 +64,9 @@ class GeneralManager:
     # load as dict & let conversion to new format occur in later processing
     if not config.loadonly:
       self._update_state_to_version(state)
-    self.chirules = {}
-    self._initfuncs()
-    self.supervisors = 'paused'
+    #self.chirules = {}
+    #self._initfuncs()
+    #self.supervisors = 'paused'
 
   @abstractmethod
   def _update_state_to_version(self):
@@ -385,6 +385,12 @@ class PseudoShelf(MutableMapping):
       os.mkdir(dirname)
     self.path = dirname
     self._backup_dict = {}
+
+  def __setstate__(self, state):
+    # TODO include versions?
+    if '_backup_dict' not in state:
+      state['_backup_dict'] = {}
+    self.__dict__.update(state)
 
   def fname(self, key):
     return os.path.join(self.path,key+'.p')

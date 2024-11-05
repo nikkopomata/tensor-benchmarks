@@ -276,6 +276,8 @@ class DMRGManager(GeneralManager):
         self.logger.critical('Unexpected pickle state')
         self.dbpath = None
         self.database = {}
+      self.__version = '1.0'
+      state['_DMRGManager__version'] = 'void'
     elif state['_DMRGManager__version'][0] == '0':
       # Registered-object form
       self._ROstatespec = [self.ntransfL,self.ntransfR]
@@ -313,6 +315,9 @@ class DMRGManager(GeneralManager):
     self.__version = '1.1'
     self.chirules = {}
     self._initfuncs()
+    if self.__version != state['_DMRGManager__version']:
+      self.logger.info('DMRGManager version updated from %s to %s',
+        state['_DMRGManager__version'],self.__version)
     self.supervisors = 'paused'
 
   # "Registered objects" (here transfer vectors)
@@ -1131,6 +1136,9 @@ class DMRGOrthoManager(DMRGManager):
       self.__version = '1.0.1'
     # TODO any necessary updates for GM
     self.__version = '1.1'
+    if self.__version != state['_DMRGOrthoManager__version']:
+      self.logger.info('DMRGOrthoManager version updated from %s to %s',
+        state['_DMRGOrthoManager__version'],self.__version)
 
   @property
   def nlefttransf(self):
