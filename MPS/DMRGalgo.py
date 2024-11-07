@@ -10,7 +10,6 @@ from collections.abc import MutableMapping
 
 # TODO integrate into general management
 # Commands that can be used within supervisor to initialize a state
-valid_initializers = ['announce']
 
 def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
     override=True, override_chis=True, resume_from_old=False, use_shelf=False,
@@ -209,6 +208,8 @@ class DMRGManager(GeneralManager):
 
   def _update_state_to_version(self, state):
     if '_DMRGManager__version' not in state:
+      state['_DMRGManager__version'] = 'void'
+    if state['_DMRGManager__version'] == 'void' or ('transfRs' in state and 'ntransfR' not in state):
       if 'ntransfR' not in state:
         self.ntransfR = len(state['transfRs'])
         self.ntransfL = len(state['transfLs'])
@@ -276,9 +277,8 @@ class DMRGManager(GeneralManager):
         self.logger.critical('Unexpected pickle state')
         self.dbpath = None
         self.database = {}
-      self.__version = '1.0'
-      state['_DMRGManager__version'] = 'void'
-    elif state['_DMRGManager__version'][0] == '0':
+      self.__version = '0.0'# check
+    if self.__version[0] == '0':
       # Registered-object form
       self._ROstatespec = [self.ntransfL,self.ntransfR]
       self._registry = {}
@@ -586,7 +586,7 @@ class DMRGManager(GeneralManager):
     assert len(self.database) == len(self._activeRO)
     # TODO change for case RO-database is not one-to-one
 
-  def setdboff(self, remove=True):
+  def setdboff(self, remove=True, restore=True):
     if self.dbpath:
       self.logger.warning('Converting shelf into local memory...')
       database = {}
@@ -597,6 +597,13 @@ class DMRGManager(GeneralManager):
         shutil.rmtree(self.dbpath)
       self.database = database
       self.dbpath = None
+      # Confirm that correct entries are present 
+      activedbkeys = set()
+      for key in self.ROstatelist(self._ROstatespec):
+        activedbkeys.update(self._ROcheckdbentries(key))
+      for k in set(self.database) - activedbkeys:
+        self.logger.info('Removing unidentified key %s',k)
+        del self.database[k]
       self.save()
     else:
       self.logger.debug('Transfer vectors already in local memory')
@@ -970,6 +977,7 @@ class DMRGOrthoManager(DMRGManager):
     self.settings.update(self.settings_allchi)
 
   def _update_state_to_version(self, state):
+    super()._update_state_to_version(state)
     if self.__version == '0':
       self.dschmidts = self.npsis*[0]
       self.__version = '0.1'
@@ -982,17 +990,18 @@ class DMRGOrthoManager(DMRGManager):
           self.suplabels = ['base']
         basestat = self.supstatus[0]
         labels = list(self.suplabels)
-        self.supstatus[0] = (self.chi,self.npsis,0)
+        self.supstatus[0] = (self.chi,self.npsis-1,0)
         self.suplabels[1] = 'addstate'
         if len(labels) > 1:
           if labels[1] == 'double':
             # Directly translates
-            niter,psi0,npsi = state
+            niter,psi0,npsi = self.supstatus[1]
+            #print(f'{psi0}/{npsi} {self.npsis}/{self.npsi_tot} states')
             if psi0 == 'bakein':
-              self.supstatus[1] = (niter,'bakein',npsi)
+              self.supstatus[1] = (niter,'bakein',self.npsis)
             else:
               niter1 = min(niter,self.settings['nsweepadd']-1)
-              self.supstatus[1] = (niter1,psi0,npsi)
+              self.supstatus[1] = (niter1,psi0,self.npsis)
           else:
             assert labels[1] == 'single'
             # Back to the start of the addstate supervisor
@@ -1014,7 +1023,8 @@ class DMRGOrthoManager(DMRGManager):
               self.restorecanonical()
       else:
         # Add npsis to base status
-        self.supstatus[0] = self.supstatus[0]+(self.npsis,)
+        c,sd = self.supstatus[0]
+        self.supstatus[0] = (c,self.npsis,sd)
       self.settings['nsweepadd'] = 10
       self.__version = '0.2'
     if self.__version == '0.2':
@@ -1132,8 +1142,14 @@ class DMRGOrthoManager(DMRGManager):
       self.passive_dependent = {i:set() for i in range(self.npsis)}
       self.passive_dependency = {j:[] for j in range(self.npassive)}
       self.settings['usereflection'] = False
+      self._updateROstate(self._ROstatespec)
       self.__version = '1.0'
     if self.__version == '1.0':
+      if not hasattr(self,'passive_states'):
+        self.passive_states = []
+        self.passive_dependent = {i:set() for i in range(self.npsis)}
+        self.passive_dependency = {j:[] for j in range(self.npassive)}
+        self._ROstatespec = np.pad(self._ROstatespec,[(0,0),(0,1),(0,0)])
       self.settings_allchi['addupdatedouble'] = True
       self.settings['addupdatedouble'] = True
       self.__version = '1.0.1'
@@ -1281,7 +1297,7 @@ class DMRGOrthoManager(DMRGManager):
         for site in range(1,self.N):
           self._registry[site,'r',ipsi,'p',jpass] = RightTransferManaged(phi,
             site,'r',psi,manager=self)
-    super()._initializeROs(statespec)
+    super(GeneralManager,self)._initializeROs(statespec)
 
   def _validateROstate(self, spec):
     assert isinstance(spec,np.ndarray)

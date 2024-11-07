@@ -5,6 +5,7 @@ from copy import copy,deepcopy
 from collections.abc import MutableMapping
 from abc import ABC,abstractmethod
 
+valid_initializers = ['announce']
 class GeneralManager:
   """Base class for optimization managers"""
   def __init__(self, savefile='auto', file_prefix=None, use_shelf=False):
@@ -315,7 +316,10 @@ class GeneralManager:
             sendval = self.supcommands[cmd](*args)
             cmd,*argall = self.supervisors[-1].send(sendval)
         (label,*args),status = argall
-        assert cmd == 'runsub' and label == self.suplabels[level+1]
+        if cmd != 'runsub':
+          raise ValueError('Command "%s" not expected before next sub-supervisor'%cmd)
+        if label != self.suplabels[level+1]:
+          raise ValueError('Expected supervisor "%s" at level %d, got "%s"'%(self.suplabels[level+1],level+1,label))
         if self.supstatus[level] != status:
           self.logger.log(25, 'Supervisor %s status %s superceded as %s',
             label, self.supstatus[level], status)
