@@ -36,7 +36,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
             savefile=savefile, use_shelf=use_shelf, **dmrg_kw)
           Mngr.restorecanonical()
           idx = chis.index(chi)
-          Mngr.setchi(idx, chi)
+          Mngr.setstage(chi)
           Mngr.supervisors = 'paused'
           Mngr.supstatus = [(chi,ds),(niter,)]
           if ds == 1:
@@ -70,7 +70,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
             Mngr.logger.info('Resuming from bond dimension determined as %d',chi)
             # State should already be canonical
             idx = chis.index(chi)
-            Mngr.setchi(idx, chi)
+            Mngr.setstage(chi)
             Mngr.supervisors = 'paused'
             Mngr.supstatus = [(chi,2)]
             Mngr.suplabels = ['base']
@@ -81,9 +81,14 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       if override_chis:
         # Reset bond dimension list
         useas = override_chis if isinstance(override_chis,str) else None
-        Mngr.resetchis(chis, use_as=useas)
+        if chis is None:
+          chi_from_settings = True
+        else:
+          Mngr.resetchis(chis, use_as=useas)
+          chi_from_settings = False
       else:
-        assert chis == Mngr.chis
+        assert chis is None or chis == Mngr.chis
+        chi_from_settings = False
       if Mngr.filename != filename:
         config.streamlog.warn('Updating save destination from %s to %s',
           Mngr.filename, filename)
@@ -92,14 +97,13 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       if override:
         # Additionally reset general settings
         dmrg_kw.pop('psi0',None)
-        Mngr.resetsettings(dmrg_kw)
+        Mngr.resetsettings(stage_override=chi_from_settings,**dmrg_kw)
       return Mngr
   return iDMRGManager(Hamiltonian, chis, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
 class iDMRGManager(DMRGManager):
   """Optimizer for iDMRG"""
-  def __init__(self, Hamiltonian, chis, N=None, transf_init=100,
-      transf_check=10, transf_delta=None, transf_restore=10000, **dmrg_kw):
+  def __init__(self, Hamiltonian, chis, N=None, **dmrg_kw):
     """MPO Hamiltonian; list of bond dimensions (or single bond dimension)
     length of unit cell (if not same as H)
     transf_init maximum number of steps for initializing transfer matrices"""
@@ -118,14 +122,10 @@ class iDMRGManager(DMRGManager):
     self.Eblock = None
     self.nblock = None
     self.ocenter = None
-    assert 'use_shelf' not in dmrg_kw
+    #assert 'use_shelf' not in dmrg_kw
     super().__init__(Hamiltonian, chis, **dmrg_kw)
-    self.settings_allchi['transf_init'] = transf_init
-    self.settings_allchi['transf_check'] = transf_check
-    self.settings_allchi['transf_delta'] = transf_delta
-    self.settings_allchi['transf_restore'] = transf_restore
-    # Initialize settings for events before setting chi
-    self.settings.update(self.settings_allchi)
+    assert not self.use_shelf
+    # TODO is this completely depricated?
     self._usenormalizers = False
 
   @property
@@ -146,7 +146,7 @@ class iDMRGManager(DMRGManager):
                          'singlesweep':iSingleSweepSupervisor}
     # Labels for bound methods
     self.supcommands = {'init':self.initstate,
-                        'setchi':self.setchi,
+                        'setchi':self.setstage,
                         'savestep':self.savestep,
                         'canonical':self.restorecanonical,
                         'righttransf':self.getrighttransfers,

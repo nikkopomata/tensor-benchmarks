@@ -1,0 +1,69 @@
+[DMRGManager]
+stage-vars = [ "chi", "index", "back_index" ]
+system-vars = [ "N" ]
+str-opts = [ ]
+globals = [ "chi", "chis" ]
+
+[DMRGManager.defaults]
+# Tolerance level for energy comparisons
+Edelta = 1e-8
+# Tolerance level for schmidt-index comparisons
+schmidtdelta = 1e-6
+# Number of sweeps between restore-canonical in single/double update
+ncanon1 = 10
+ncanon2 = 10
+# Maximum number of sweeps in single/double update
+nsweep1 = 1000
+nsweep2 = 100
+# Tolerance for SVD in restore-canonical
+tol0 = 1e-12
+# Tolerance for SVD in single/double update
+tol1 = 'none'
+tol2 = 1e-12
+# Tolerance for iterative eigenvalue solver
+eigtol = 'none'
+# eigtol relative to change in E (initial tolerance is still eigtol)
+eigtol_rel = 'none'
+# Increase in tolerance for double update
+tolratio = 1
+
+[DMRGOrthoManager]
+inherit-from = "DMRGManager"
+stage-vars = [ "npsis" ]
+system-vars = [ "nfixed" ]
+globals = [ "npsis" ]
+
+[DMRGOrthoManager.defaults]
+# Tolerance level in projecting out orthogonal states
+ortho_tol = 1e-7
+# Number of eigenvectors to compute in optimization
+keig = 1
+# Number of sweeps for "bake-in" phase
+bakein = 5
+# Number of sweeps for all-state update during state-adding phase
+nsweepadd = 10
+# Threshold for all-state update during state-adding phase
+newthresh = 1e-3
+# Use double-update for all-state update in state-adding phase
+# (if integer, will do 1 double-update sweep for every # sweeps)
+addupdatedouble = true
+# Tolerance level for schmidt-index comparisons during single update
+schmidtdelta1 = 2e-8
+# Enforce orthogonality against reflection of other states as well
+usereflection = false
+# Start iterative diagonalization with a 'guess' tensor
+useguess = true
+
+[iDMRGManager]
+inherit-from = "DMRGManager"
+
+[iDMRGManager.defaults]
+# Number of unit cells to incorporate in initializing transfer matrix
+transf_init = 100
+# How long to wait between checking for convergence while initializing transfers
+transf_check = 10
+# Convergence criterion for transfers
+transf_delta = 'none'
+# Maximum Arnoldi iterations while re-converging transfer matrices
+transf_restore = 10000
+# _use_normalizers = false

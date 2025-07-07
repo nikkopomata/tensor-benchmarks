@@ -54,12 +54,32 @@ streamhandler.setFormatter(logging.Formatter('%(message)s'))
 streamlog.addHandler(streamhandler)
 linalg_log = logger.getChild('linalg')
 opt_log = logger.getChild('optimization')
+settings_log = logger.getChild('settings')
 logger.setLevel(logging.DEBUG)
 stdout_handler = logging.StreamHandler(sys.stderr)
 stdout_handler.setLevel(logging.ERROR)
 stdout_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
 logger.addHandler(stdout_handler)
 def setlogging(logfile, fmtstring, level=logging.DEBUG, datefmt=None,mode='a'):
+  # mode may optionaly be 'prerotate': rotates files and then injects datetime
+  if mode == 'prerotate':
+    import glob,os,re,time
+    newidx = []
+    for f in glob.glob(glob.escape(logfile) + '.*'):
+      m = re.search(r'\.(\d)+$',f)
+      if m:
+        idx = int(m.group(1))
+        fnew = '%s.%d~'%(logfile,idx+1)
+        os.rename(f,fnew)
+        newidx.append(idx+1)
+    if os.path.isfile(logfile):
+      os.rename(logfile,logfile+'.1')
+    for idx in newidx:
+      os.rename('%s.%d~'%(logfile,idx),'%s.%d'%(logfile,idx))
+    fp = open(logfile,'w')
+    fp.write(time.asctime()+'\n')
+
+    mode = 'a'
   if level < logger.getEffectiveLevel():
     logger.setLevel(level)
   handler = logging.FileHandler(logfile,mode=mode)

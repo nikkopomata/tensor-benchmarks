@@ -1,6 +1,6 @@
 from .mpsbasic import *
 from .. import config
-from ..management import GeneralManager,PseudoShelf,safedump
+from ..management import BondOptimizer,GeneralManager,PseudoShelf,safedump
 import os,os.path,shutil
 import pickle,shelve,contextlib,itertools
 import logging
@@ -8,7 +8,6 @@ import numpy as np
 from copy import copy,deepcopy
 from collections.abc import MutableMapping
 
-# TODO integrate into general management
 # Commands that can be used within supervisor to initialize a state
 
 def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
@@ -53,7 +52,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
             savefile=savefile, use_shelf=use_shelf, **dmrg_kw)
           Mngr.restorecanonical()
           idx = chis.index(chi)
-          Mngr.setchi(idx, chi)
+          Mngr.setstage(chi)
           Mngr.supervisors = 'paused'
           Mngr.supstatus = [(chi,ds),(niter,)]
           if ds == 1:
@@ -89,7 +88,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
             Mngr.logger.info('Resuming from bond dimension determined as %d',chi)
             # State should already be canonical
             idx = chis.index(chi)
-            Mngr.setchi(idx, chi)
+            Mngr.setstage(chi)
             Mngr.supervisors = 'paused'
             Mngr.supstatus = [(chi,2)]
             Mngr.suplabels = ['base']
@@ -97,10 +96,16 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
         return Mngr
       if override_chis:
         # Reset bond dimension list
-        useas = override_chis if isinstance(override_chis,str) else None
-        Mngr.resetchis(chis, use_as=useas)
+        # TODO better way of doing this
+        if chis is not None:
+          useas = override_chis if isinstance(override_chis,str) else None
+          Mngr.resetchis(chis, use_as=useas)
+          chi_from_settings = False
+        else:
+          chi_from_settings = True
       else:
-        assert chis == Mngr.chis
+        assert chis is None or chis == Mngr.chis
+        chi_from_settings = False
       if Mngr.filename != filename:
         config.streamlog.warning('Updating save destination from %s to %s',
           Mngr.filename, filename)
@@ -109,7 +114,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       if override:
         # Additionally reset general settings
         dmrg_kw.pop('psi0',None)
-        Mngr.resetsettings(dmrg_kw)
+        Mngr.resetsettings(stage_override=chi_from_settings,**dmrg_kw)
         if use_shelf:
           Mngr.setdbon()
         else:
@@ -118,13 +123,10 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
   return DMRGManager(Hamiltonian, chis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
 
-class DMRGManager(GeneralManager):
+class DMRGManager(BondOptimizer):
   """Optimizer for DMRG"""
-  def __init__(self, Hamiltonian, chis, psi0=None,
-              file_prefix=None, savefile='auto', use_shelf=False,
-              Edelta=1e-8, schmidtdelta=1e-6,ncanon1=10,ncanon2=10,
-              nsweep1=1000,nsweep2=100,tol2=1e-12,tol1=None,tol0=1e-12,
-              eigtol=None, eigtol_rel=None,tolratio=1,savesafe=False):
+  _default_file = 'MPS/dmrgdefaults.toml'
+  def __init__(self, Hamiltonian, *args, psi0=None, **kw_args):
     """MPO Hamiltonian; list of bond dimensions (or single bond dimension)
       psi0 if provided is the initial state
       file_prefix: optional prefix to save after bond-dimension steps
@@ -144,10 +146,6 @@ class DMRGManager(GeneralManager):
         (initial value tolerance is still eigtol)
       tolratio gives increase in tolerance for double update"""
     self.__version = '1.1'
-    if isinstance(chis,int):
-      self.chis = [chis]
-    else:
-      self.chis = chis
     self.H = Hamiltonian
     # Initialize state & its properties
     self.psi = psi0
@@ -157,16 +155,29 @@ class DMRGManager(GeneralManager):
     self.schmidt0 = None
     self.E = None
     self.E0 = None
-    self.eigtol = None
+    self._reldiff = None
 
-    # General (all-bond-dimension) settings
-    self.settings_allchi = dict(Edelta=Edelta, schmidtdelta=schmidtdelta,
-           ncanon1=ncanon1,ncanon2=ncanon2,nsweep1=nsweep1,nsweep2=nsweep2,
-           tol0=tol0,tol1=tol1,tol2=tol2,eigtol=eigtol,eigtol_rel=eigtol_rel,
-           tolratio=tolratio,savesafe=False)
+    if args:
+      if isinstance(args[0],int):
+        self.chis = [args[0]]
+      else:
+        self.chis = list(args[0])
+      if len(args) > 1:
+        assert psi0 is None
+        self.psi = args[1]
+    else:
+      self.chis = None
 
-    super().__init__(savefile=savefile,file_prefix=file_prefix,use_shelf=use_shelf)   
-    self.savelevel = 2 # Max level (# supervisors) to save at
+    super().__init__(**kw_args)   
+    if self.chis is None:
+      if 'chis' in self.settings_man.global_settings:
+        self.chis = list(self.settings_man.global_settings['chis'])
+      else:
+        self.chis = [self.settings_man.global_settings['chi']]
+    else:
+      # TODO feels redundant
+      self.set_setting('chis',self.chis)
+
 
   @property
   def nlefttransf(self):
@@ -185,7 +196,7 @@ class DMRGManager(GeneralManager):
                          'singlesweep':singleSweepSupervisor}
     # Labels for bound methods
     self.supcommands = {'init':self.initstate,
-                        'setchi':self.setchi,
+                        'setchi':self.setstage,
                         'savestep':self.savestep,
                         'canonical':self.restorecanonical,
                         'righttransf':self.getrighttransfers,
@@ -202,9 +213,12 @@ class DMRGManager(GeneralManager):
                         'resettol':self.resettol}
     self.callables = {}
 
-  def _initlog(self):
+  def _initlog(self,level=None):
+    # TODO was there a reason for defaulting to 10 instead of parent level?
+    # TODO move to superclass w/ name constant?
     self.logger = config.logger.getChild('DMRG')
-    self.logger.setLevel(10)
+    if level is not None:
+      self.logger.setLevel(level)
 
   def _update_state_to_version(self, state):
     if '_DMRGManager__version' not in state:
@@ -278,6 +292,7 @@ class DMRGManager(GeneralManager):
         self.dbpath = None
         self.database = {}
       self.__version = '0.0'# check
+    self.logger.debug('Unpickling DMRGManager from version %s',self.__version)
     if self.__version[0] == '0':
       # Registered-object form
       self._ROstatespec = [self.ntransfL,self.ntransfR]
@@ -315,6 +330,14 @@ class DMRGManager(GeneralManager):
         self.database._backup_dict = {}
       self.__version = '1.0.3'
     # TODO any necessary updates from pre-GM
+    if self.__version == '1.0.3':
+      if isinstance(state['eigtol'],float) and self.settings.get('eigtol_rel',None):
+        self._reldiff = state['eigtol']/self.settings['eigtol_rel']
+      else:
+        self._reldiff = None
+    # Reached point of general manager superclass existing, should be safe
+    # to invoke
+    super()._update_state_to_version(state)
     self.__version = '1.1'
     self.chirules = {}
     self._initfuncs()
@@ -408,6 +431,9 @@ class DMRGManager(GeneralManager):
     ntl,ntr = statespec
     return [(n,'l') for n in range(ntl)]+[(self.N-n-1,'r') for n in range(ntr)]
 
+  def query_system(self):
+    return {'N':self.N}
+
   def shiftleftupto(self, site):
     """Align left transfer vectors up to (not including) site
     If not at edge, return (new) rightmost left transfer matrix"""
@@ -435,11 +461,21 @@ class DMRGManager(GeneralManager):
     transf = tR0.moveby(self.N-self.nrighttransf-1,unstrict=True)
     self.E = np.real(transf.left(terminal=True))
     self.logger.log(20,'Energy calculated as %s',self.E) 
-    if self.E0 is not None and self.settings['eigtol_rel'] and updaterel:
+    if self.E0 is not None and updaterel:
+      # TODO update eigtol if changed on reload?
       dE = abs(self.E - self.E0)
-      self.eigtol = self.settings['eigtol_rel']*dE
-      self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
+      self._reldiff = dE
+      if self.settings['eigtol_rel']:
+        #self.eigtol = self.settings['eigtol_rel']*dE
+        self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
     return self.E
+
+  @property
+  def eigtol(self):
+    if self.settings['eigtol_rel'] and self._reldiff:
+      return self.settings['eigtol_rel'] * self._reldiff
+    else:
+      return self.settings['eigtol']
 
   def savestep(self):
     """Save output after optimizing a single bond dimension"""
@@ -449,8 +485,8 @@ class DMRGManager(GeneralManager):
   def resettol(self):
     """Reset eigtol_rel to eigtol"""
     if self.settings['eigtol'] is not None:
-      self.logger.log(10,'Resetting eigtol_rel to %s',self.settings['eigtol'])
-      self.eigtol = self.settings['eigtol']
+      self.logger.log(10,'Resetting eigtol to %s',self.settings['eigtol'])
+      self._reldiff = None
 
   def initstate(self):
     # Options for passing MPS
@@ -490,123 +526,17 @@ class DMRGManager(GeneralManager):
     if not self.E:
       self.getE()
 
-  def setchi(self, idx, chi):
-    # Step data
-    self.chiindex = idx
-    self.chi = chi
-    # Bond-dimension-dependent settings
-    self.settings.update(self.settings_allchi)
-    if chi in self.chirules:
-      self.logger.debug('Found settings of %s at bond dimension %d',list(self.chirules[chi]),chi)
-      self.settings.update(self.chirules[chi])
-    # Eigenvalue tolerance
-    self.eigtol = self.settings['eigtol']
-    self.logger.log(10, 'eigtol_rel set to %s',self.eigtol)
-    config.streamlog.log(30, 'chi = % 3d (#%s)', chi, idx)
-  
+  def _update_stage(self, chi):
+    super()._update_stage(chi)
+    # Reset eigenvalue tolerance
+    # TODO what about resume?
+    self._reldiff = None
+
   def getrighttransfers(self, n0):
     self.logger.log(10, 'Collecting right transfer matrices')
     # TODO gauge from canonical
     self.clearall()
     self._updateROstate((0,self.N-n0))
-
-  def setdbon(self):
-    dbpath = self.filename[:-1]+'d'
-    if not self.dbpath:
-      self.logger.warning('Transferring transfer tensors to shelf...')
-      # Create database
-      database = PseudoShelf(dbpath)
-      database.update(self.database)
-      del self.database
-      self.database = database
-      self.dbpath = dbpath
-      self.logger.debug('Shelf created at %s',dbpath)
-      self.save()
-    elif dbpath != self.dbpath:
-      self.logger.info('Copying shelf from %s to %s',dbpath,self.dbpath)
-      if isinstance(self.database,PseudoShelf):
-        self.dbpath,dbp0 = dbpath,self.dbpath
-        try:
-          self.database.copyto(dbpath)
-        except FileNotFoundError:
-          self.logger.warning('Shelf directory not found, repopulating %d left '
-            'and %d right transfer vectors', *self._ROstatespec)
-          self.regenerate()
-        except FileExistsError:
-          assert not os.path.isdir(dbp0)
-          self.logger.warning('Assuming database has already been moved to %s',
-            dbpath)
-          # TODO it's natural to move paths, should have better checks
-          self.database.path = os.path.abspath(dbpath)
-      else:
-        self.database = PseudoShelf(dbpath)
-        try:
-          self.database.update(self.dbpath)
-        except FileNotFoundError:
-          self.logger.warning('Shelf directory not found, repopulating %d left and '
-            '%d right transfer vectors', self.ntransfL,self.ntransfR)
-          self.regenerate()
-      # Move database
-      # TODO should this save command be here?
-      self.save()
-    else:
-      self.logger.debug('Shelf already in place')
-      self.database.path = dbpath
-    try:
-      self.checkdatabase()
-    except AssertionError:
-      self.logger.exception('Error checking database; recomputing transfers')
-      self.regenerate()
-
-  def regenerate(self):
-    statespec = self._ROstatespec
-    self.clearall()
-    self._initializeROs(statespec)
-
-  def checkdatabase(self):
-    self.logger.debug('Checking database and restoring entries as necessary')
-    if self.dbpath:
-      if not isinstance(self.database,PseudoShelf):
-        self.database = PseudoShelf(self.dbpath)
-      elif not os.path.isdir(self.dbpath):
-        self.logger.warning('Directory %s not found; creating',self.dbpath)
-        os.mkdir(self.dbpath)
-      dbkeys = self.database.checkentries()
-    else:
-      dbkeys = set(self.database)
-    # Check converted: TODO depricate
-    for key in self._registry:
-      assert self._validateRO(key)
-    activedbkeys = set()
-    for key in self.ROstatelist(self._ROstatespec):
-      activedbkeys.update(self._ROcheckdbentries(key))
-    for k in dbkeys - activedbkeys:
-      self.logger.info('Removing unidentified key %s',k)
-      del self.database[k]
-    assert len(self.database) == len(self._activeRO)
-    # TODO change for case RO-database is not one-to-one
-
-  def setdboff(self, remove=True, restore=True):
-    if self.dbpath:
-      self.logger.warning('Converting shelf into local memory...')
-      database = {}
-      for k in self.database:
-        database[k] = self.database[k]
-      if remove:
-        self.logger.warning('Deleting shelf database directory')
-        shutil.rmtree(self.dbpath)
-      self.database = database
-      self.dbpath = None
-      # Confirm that correct entries are present 
-      activedbkeys = set()
-      for key in self.ROstatelist(self._ROstatespec):
-        activedbkeys.update(self._ROcheckdbentries(key))
-      for k in set(self.database) - activedbkeys:
-        self.logger.info('Removing unidentified key %s',k)
-        del self.database[k]
-      self.save()
-    else:
-      self.logger.debug('Transfer vectors already in local memory')
           
   def gettransfR(self, n):
     self.logger.debug('Fetching right transfer %d',n)
@@ -628,7 +558,7 @@ class DMRGManager(GeneralManager):
     self.getE()
     Ediff = self.E-self.E0
     self.logger.log(20, '[%s]  energy diff %s', niter, Ediff)
-    config.streamlog.log(30,f'[% 3d] %+12.4g E=%0.10f',niter,Ediff,self.E)
+    config.streamlog.log(30,f'[% 4d] %#+12.4g E=%#0.10f',niter,Ediff,self.E)
     return abs(Ediff)
 
   def saveschmidt(self):
@@ -686,7 +616,7 @@ class DMRGManager(GeneralManager):
     self.logger.log(20, '[%s] schmidt diff %s', niter, Ldiff)
     self.getE()
     self.logger.log(20, '[%s]  energy diff %s', niter, self.E-self.E0)
-    config.streamlog.log(30,f'[% 4d] %10.4g %+10.4g E=%0.10f',niter,Ldiff,self.E-self.E0,self.E)
+    config.streamlog.log(30,f'[% 4d] %#10.4g %#+10.4g E=%#0.10f',niter,Ldiff,self.E-self.E0,self.E)
     if return_Ediff:
       return Ldiff,abs(self.E-self.E0)
     return Ldiff
@@ -712,7 +642,10 @@ class DMRGManager(GeneralManager):
     self.shiftrightupto(n+1)
     tR = self.gettransfR(n+2)
     tL = self.gettransfL(n-1)
-    eigtol = min(self.settings['eigtol'],self.eigtol*self.settings['tolratio'])
+    #eigtol = min(self.settings['eigtol'],self.eigtol*self.settings['tolratio'])
+    eigtol = self.eigtol
+    if eigtol is not None and self.settings['tolratio'] != 1:
+      eigtol *= self.settings['tolratio']
     self.H.DMRG_opt_double(self.psi, n, self.chi,
         tL,tR,None,direction=='r', self.settings['tol2'], eigtol)
 
@@ -764,9 +697,10 @@ class DMRGManager(GeneralManager):
 
 def baseSupervisor(chis, N, settings, state=None):
   if state is None:
-    yield 'init',()
     cidx = 0
-    yield 'setchi',(0,chis[0])
+    #yield 'setchi',(0,chis[0])
+    yield 'setchi',(chis[0],)
+    yield 'init',()
   else:
     chi,nupdate = state
     cidx = chis.index(chi)
@@ -779,14 +713,16 @@ def baseSupervisor(chis, N, settings, state=None):
         return
       else:
         yield 'savestep', ()
-        yield 'setchi',(cidx,chis[cidx])
+        #yield 'setchi',(cidx,chis[cidx])
+        yield 'setchi',(chis[cidx],)
   while cidx < len(chis):
     yield 'runsub',('double',N),(chis[cidx],2)
     yield 'runsub',('single',N),(chis[cidx],1)
     cidx += 1
     if cidx < len(chis):
       yield 'savestep', ()
-      yield 'setchi',(cidx,chis[cidx])
+      #yield 'setchi',(cidx,chis[cidx])
+      yield 'setchi',(chis[cidx],)
   yield 'complete',()
 
 def doubleOptSupervisor(N, settings, state=None):
@@ -902,13 +838,21 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
       Mngr = pickle.load(open(filename,'rb'))
       if override_chis:
         # Reset bond dimension list
+        # TODO options for resetting npsis
         useas = override_chis if isinstance(override_chis,str) else None
-        Mngr.resetchis(chis, use_as=useas)
         assert npsis >= Mngr.npsis
-        Mngr.npsi_tot = npsis
+        stage_from_settings = False
+        if chis is not None:
+          Mngr.resetchis(chis, use_as=useas)
+        elif npsis != Mngr.npsi_tot:
+          Mngr.npsi_tot = npsis
+          Mngr.resetchis(Mngr.chis)
+        else:
+          stage_from_settings = True
       else:
-        assert chis == Mngr.chis
+        assert chis is None or chis == Mngr.chis
         assert npsis == Mngr.npsi_tot
+        stage_from_settings = False
       if Mngr.filename != filename:
         config.streamlog.warn('Updating save destination from %s to %s',
           Mngr.filename, filename)
@@ -918,7 +862,7 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
         # Additionally reset general settings
         dmrg_kw.pop('psi0',None)
         dmrg_kw.pop('persiteshift',None)
-        Mngr.resetsettings(dmrg_kw)
+        Mngr.resetsettings(stage_override=stage_from_settings,**dmrg_kw)
         if use_shelf:
           Mngr.setdbon()
         else:
@@ -937,12 +881,11 @@ def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
 class DMRGOrthoManager(DMRGManager):
   """Set of low-lying orthogonal states"""
   def __init__(self, Hamiltonian, chis, npsis, fixed_states=None,
-      ortho_tol=1e-7, keig=1, newthresh=1e-3,schmidtdelta1=2e-8,bakein=5,
-      nsweepadd=10, persiteshift=0, usereflection=False, addupdatedouble=True,
-      **kw_args):
+      persiteshift=0, **kw_args):
     self.psiindex = 0
     self.npsi_tot = npsis
     self.npsis = 1
+    self.npsi_stage = self.npsis
     self.psilist = [None]
     self.Es = [None]
     self.s0s = [None]
@@ -962,19 +905,14 @@ class DMRGOrthoManager(DMRGManager):
     if persiteshift <= 0:
       raise ValueError('persiteshift must be provided')
     self.Eshift = self.N*persiteshift
-    self.__version = '1.1'
+    # Override useguess from settings
+    self._guess_override = None
+    self.__version = '1.1.1'
     # State specification:
     # (i,i,<0/1>) -> number of <left/right> Hamiltonian transfers for state i
     # (i,j,<0/1>) -> number of transfers between states i and j
     # (i,-1,:) -> dummy for if transfers w/ passive states dependent on i
     #   are kept
-    self._ROstatespec = np.zeros((self.npsis,self.npsis+1,2),dtype=int)
-    self._ROstatespec[1:,-1,:] = 1
-    self.settings_allchi.update(ortho_tol=ortho_tol,keig=keig,
-      newthresh=newthresh,schmidtdelta1=schmidtdelta1,bakein=bakein,
-      nsweepadd=nsweepadd,usereflection=usereflection,
-      addupdatedouble=addupdatedouble,useguess=True)
-    self.settings.update(self.settings_allchi)
 
   def _update_state_to_version(self, state):
     super()._update_state_to_version(state)
@@ -1025,11 +963,12 @@ class DMRGOrthoManager(DMRGManager):
         # Add npsis to base status
         c,sd = self.supstatus[0]
         self.supstatus[0] = (c,self.npsis,sd)
-      self.settings['nsweepadd'] = 10
+      # With SettingsManager will already have been set to default
+      #self.settings['nsweepadd'] = 10
       self.__version = '0.2'
     if self.__version == '0.2':
-      if self.eigtol is not None:
-        self.eigtol = abs(self.eigtol)
+      if state['eigtol'] is not None:
+        state['eigtol'] = abs(state['eigtol'])
       # transfLs/transfRs will have been converted from old form,
       # correct registered objects as appropriate for ortho form
       ntL,ntR = self._ROstatespec
@@ -1141,7 +1080,8 @@ class DMRGOrthoManager(DMRGManager):
       self.passive_states = []
       self.passive_dependent = {i:set() for i in range(self.npsis)}
       self.passive_dependency = {j:[] for j in range(self.npassive)}
-      self.settings['usereflection'] = False
+      # With SettingsManager will have already been set to default
+      #self.settings['usereflection'] = False
       self._updateROstate(self._ROstatespec)
       self.__version = '1.0'
     if self.__version == '1.0':
@@ -1150,14 +1090,31 @@ class DMRGOrthoManager(DMRGManager):
         self.passive_dependent = {i:set() for i in range(self.npsis)}
         self.passive_dependency = {j:[] for j in range(self.npassive)}
         self._ROstatespec = np.pad(self._ROstatespec,[(0,0),(0,1),(0,0)])
-      self.settings_allchi['addupdatedouble'] = True
-      self.settings['addupdatedouble'] = True
+      # With SettingsManager will have already been set to default
+      #self.settings_allchi['addupdatedouble'] = True
+      #self.settings['addupdatedouble'] = True
       self.__version = '1.0.1'
+      self.__version = '1.1'
+    if self.__version == '1.1':
+      self._guess_override = None
+      self.npsi_stage = self.npsis
+    self.__version = '1.1.1'
     # TODO any necessary updates for GM
-    self.__version = '1.1'
     if self.__version != state['_DMRGOrthoManager__version']:
       self.logger.info('DMRGOrthoManager version updated from %s to %s',
         state['_DMRGOrthoManager__version'],self.__version)
+
+  @property
+  def useguess(self):
+    # TODO could be a job for a context manager?
+    if self._guess_override is not None:
+      return self._guess_override
+    else:
+      return self.settings['useguess']
+
+  def query_system(self):
+    # TODO is nfixed intended to be different from npassive?
+    return {'N':self.N, 'nfixed':self.npassive}
 
   @property
   def nlefttransf(self):
@@ -1219,6 +1176,10 @@ class DMRGOrthoManager(DMRGManager):
     self.supcommands['benchmark1'] = self.benchmark1
     self.supcommands['benchmark2'] = self.benchmark2
     self.supcommands['getdiff'] = self.get_schmidt_diff
+    self.supcommands['setchi'] = self.setchi
+
+  def setchi(self, chi):
+    self.setstage(chi, self.npsi_stage)
 
   def savestep(self):
     """Save output after completing bond-dimension optimization"""
@@ -1233,6 +1194,30 @@ class DMRGOrthoManager(DMRGManager):
     if self.npsis < self.npsi_tot and niter == self.settings['nsweep2']-1:
       return self.npsis,True
     return self.npsis, (self.npsi_tot > self.npsis and delta is not None and delta < self.settings['newthresh'])
+
+  # Stage-related methods: incorporate stage variable npsi
+  def _configure_stage_settings(self, override=False):
+    if override or self.npsi_tot is None:
+      self.npsi_tot = self.settings_man.global_settings['npsis']
+    BondOptimizer._configure_stage_settings(self, override=override)
+
+  def _update_stage(self, chi, npsis):
+    if chi != self.chi: # TODO or npsis constant for resume? 
+      BondOptimizer._update_stage(self, chi)
+    self.npsi_stage = npsis
+    self.logger.info('Stage set to chi=%d, # states=%d',chi,npsis)
+    self._reldiff = None
+  
+  def query_stage(self, chi, npsis):
+    sd = BondOptimizer.query_stage(self, chi)
+    sd['npsis'] = npsis
+    return sd
+
+  def _get_stage_data(self):
+    return (self.chi, self.npsi_stage)
+
+  def resume_message(self):
+    config.streamlog.log(30, 'Resuming: chi = % 3d (#%s), %d states', self.chi, self.chiindex, self.npsis)
 
   def _computeRO(self,key,flip=False):
     site,direction,*spec = key
@@ -1507,9 +1492,9 @@ class DMRGOrthoManager(DMRGManager):
     dEtot = np.sum(self.Es)-np.sum(self.E0s)
     Ldtot = np.mean(self.dschmidts)
     config.streamlog.log(30,f'[% 3d] %#-12.4g %#-12.4g : %#-+12.4g (%#0.10f)',niter,Ldtot,dEavg,dEtot,np.mean(self.Es))
+    self._reldiff = dEavg
     if self.settings['eigtol_rel']:
-      self.eigtol = self.settings['eigtol_rel']*dEavg
-      self.logger.log(10,'eigtol_rel set to %s',self.eigtol)
+      self.logger.log(10,'eigtol set to %s',self.eigtol)
     return Ldtot
 
   def initstate_from_fixed(self):
@@ -1519,10 +1504,10 @@ class DMRGOrthoManager(DMRGManager):
     psi = copy(self.passive_states[0])
     self.psilist[0] = psi
     self._initializeROs()
-    self.settings['useguess'] = False
-    self.eigtol = self.settings['eigtol']
+    self._guess_override = False
+    self._reldiff = None
     self.doubleupdate(site,'r')
-    self.settings['useguess'] = True
+    self._guess_override = None
     self.logger.info('Completing by imposing canonical form')
     self.shiftleftupto(0)
     self.shiftrightupto(self.N-1)
@@ -1535,7 +1520,9 @@ class DMRGOrthoManager(DMRGManager):
 
   def newstate_center(self):
     # Initialize with previous
+    # TODO move set-stage to wrapper
     config.streamlog.log(30,'[ Adding state #%d ]', self.npsis)
+    self.setstage(self.chi, self.npsis+1)
     site = self.N//2-1
     self.logger.info('Initializing state #%d with double update at site %d',
       self.npsis,site)
@@ -1579,9 +1566,9 @@ class DMRGOrthoManager(DMRGManager):
     statespec[:,[-1,-2],:] = statespec[:,[-2,-1],:]
     self.expandROs(newtransf, statespec)
     self.selectpsi(self.npsis-1,(site-1,site+2))
-    ug,self.settings['useguess'] = self.settings['useguess'],False
+    self._guess_override = False
     self.doubleupdate(site,'r')
-    self.settings['useguess'] = True
+    self._guess_override = None
     self.logger.info('Completing by imposing canonical form')
     self.restorecanonical()
     if self.settings['usereflection']:
@@ -1690,7 +1677,7 @@ class DMRGOrthoManager(DMRGManager):
     self.logger.debug('Effective Hamiltonian projected down')
     # Prepare initial guess
     # TODO regauge after update? 
-    if self.settings['useguess']:
+    if self.useguess:
       if gauge is None:
         self.logger.log(5,'No gauge')
       else:
@@ -1834,7 +1821,7 @@ def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
   if state is None:
     yield 'init',()
     cidx = 0
-    yield 'setchi',(0,chis[0])
+    yield 'setchi',(chis[0],)
     npsis = np0
   else:
     chi,npsis,nupdate = state
@@ -1848,7 +1835,7 @@ def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
         return
       else:
         yield 'savestep', ()
-        yield 'setchi',(cidx,chis[cidx])
+        yield 'setchi',(chis[cidx],)
   # First add all states
   while npsis < npsitot:
     yield 'runsub',('addstate',N,npsis),(chis[cidx],npsis,0)
@@ -1859,7 +1846,7 @@ def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
     cidx += 1
     if cidx < len(chis):
       yield 'savestep', ()
-      yield 'setchi',(cidx,chis[cidx])
+      yield 'setchi',(chis[cidx],)
   yield 'complete',()
 
 # TODO bond dimension only for state initialization
