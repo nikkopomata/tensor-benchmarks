@@ -790,10 +790,12 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
       Vd[ic:ic+d*n,ir:ir+Vk.shape[1]] = Vk
       ic += d*n
     if ic == 0:
-      print(VL._decomp,VR._decomp)
-      print(V_cl._decomp,snorm)
+      #print(VL._decomp,VR._decomp)
+      #print(V_cl._decomp,snorm)
       # SVD returns 0: probably provided non-invariant tensor
-      if abs(self-self.symmetrized())/snorm > 1e-12:
+      if snorm == 0:
+        raise ValueError('SVD failure: vanishing tensor')
+      elif abs(self-self.symmetrized())/snorm > tolerance:
         raise ValueError('SVD failure: tensor passed does not transform properly')
       else:
         raise ValueError('SVD failure: dominant singular values not found (reason unclear)')

@@ -216,6 +216,7 @@ class MPS(MPSgeneric):
       rc = map('-<'.__getitem__,rc)
       canon_logger.log(complevel, 'canon eval: '+(self.N-1)*'%s%s%s',
         *sum(zip(rc,lc,mid),()))
+
   def normsq(self):
     return self.dot(self)
 
@@ -276,6 +277,60 @@ class MPS(MPSgeneric):
         self._matrices[l] = T1
         self._matrices[l+1] = self._matrices[l+1].truncate_bond('l*',keep,V=T1.getspace('r'))
         self._schmidt[l] = list(aschmidt[keep])
+
+  def _expvsum_nocanon(self, parses, ops, xls):
+    # TODO lterm & rterm as in other expvs?
+    # TODO generalize for non-canonical-form iMPS
+    # TODO check various cases for partial canonical forms
+    nO = len(ops)
+    ns = [O.rank//2 for O in ops]
+    xrs = [xls[i] + ns[i] - 1 for i in range(nO)]
+    T = self.getTL(0)
+    assert T.idxset == {'r','b'}
+    if self._leftcanon[0]:
+      T = True
+    else:
+      T = T.contract(T,'b-b;r>t;r>b*')
+    # Collect all needed left transfer matrices
+    lTs = [T]
+    for n in range(1,max(xls)):
+      T = self.getTL(n)
+      if lTs[-1] is True:
+        # Sites further left are (left) canonical
+        if self._leftcanon[n]:
+          lTs.append(True)
+        else:
+          lTs.append(T.contract(T,'b-b,l-l;r>t;r>b*'))
+      else:
+        lT = lTs[-1].contract(T,'t-l;b>b;r>t,b>q')
+        lT = lT.contract(T,'b-l,q-b;~;r>b*')
+        lTs.append(lT)
+    # Sort by right position
+    idx_r = list(np.argsort(xrs))[::-1]
+    # Iterate through indices & operators
+    iO = 0
+    rT = True
+    value = 0
+    for xr in range(self.N-1,-1,-1):
+      while iO < nO and xrs[idx_r[iO]] == xr:
+        idx = idx_r[iO]
+        value += self.local_operator_expv(parses[idx], ops[idx],xls[idx],
+          lterm=lTs[xls[idx]-1] if xls[idx] else True, rterm=rT)
+        iO += 1
+      if iO == nO:
+        break
+      T = self.getTR(xr)
+      if rT is True:
+        # Sites further right are (right) canonical
+        if not self._rightcanon[xr]:
+          if xr == self.N-1:
+            rT = T.contract(T,'b-b;l>t;l>b*')
+          else:
+            rT = T.contract(T,'b-b,r-r;l>t;l>b*')
+      else:
+        rT = T.contract(T,'t-r;b>b;l>t,b>q')
+        rT = rT.contract(T,'b-r,q-b;~;l>b*')
+    return value
    
   def todense(self,sitenames=None,suffix=''):
     if not sitenames:

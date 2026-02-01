@@ -161,12 +161,6 @@ class iDMRGManager(DMRGManager):
     self.callables = {}
   
   # No registered objects (for now)
-  _nullROstate = None
-  def _validateROstate(self, spec):
-    assert spec is None
-
-  def ROstatelist(self, statespec):
-    return []
 
   @property
   def rtransf_site(self):

@@ -328,16 +328,16 @@ class MPSgeneric(ABC):
       self.logcanon(8,thresh=1e-13)
     return U0
 
-  def tebd_bulk(self, U, chi, n):
+  def tebd_bulk(self, U, chi, n, **svd_args):
     ML = self.getTL(n).diag_mult('r',self.getschmidt(n))
     MR = self.getTR(n+1)
     M = ML.contract(MR,'r-l;b>bl,l>l;b>br,r>r')
     T = U.contract(M, 'tl-bl,tr-br;~')
     if self.charged_at(n+1):
       # Need to put right first
-      MR,s,ML = T.svd('br,r|l,r|bl,l',chi=chi)
+      MR,s,ML = T.svd('br,r|l,r|bl,l',chi=chi,**svd_args)
     else:
-      ML,s,MR = T.svd('bl,l|r,l|br,r',chi=chi)
+      ML,s,MR = T.svd('bl,l|r,l|br,r',chi=chi,**svd_args)
     norm = np.linalg.norm(s)
     self.setschmidt(s/norm,n,strict=False)
     self.setTL(ML.renamed('bl-b'),n,unitary=True)
@@ -431,12 +431,14 @@ class MPSgeneric(ABC):
     return NotImplemented
 
   def local_operator_expv(self, subparse, O, x0, lterm=False, rterm=False):
-    # Processing for expectation values of local operators
-    # subparse parses t1-b1,t2-b2,...
-    # O is the operator
-    # x0 is the initial site
-    # lterm/rterm are either boolean to indicate closed/open boundary or
-    #   otherwise are transfer matrices
+    """Processing for expectation values of local operators
+    subparse parses t1-b1,t2-b2,...
+    O is the operator
+    x0 is the initial site
+    lterm/rterm are either boolean to indicate closed/open boundary or
+      otherwise are transfer matrices
+      Closed boundary assumes canonical form"""
+    # TODO closed BC without canonical form
 
     # Pre-processing
     subsubs = subparse.split(',')
@@ -502,7 +504,7 @@ class MPSgeneric(ABC):
     return self.local_operator_expv(parse, O, n, lterm=True, rterm=True)
 
   def expv(self, parse, *Oxs):
-    """Expectation value of multiple operators
+    """Expectation value of multiple operators (disjoint, as product)
     parse: t1-b1,t2-b2;t1-b1,...
     args alternates sites & operators: x1, then O1 at site x1,
       then x2, then O2 at site x2, etc.
@@ -567,6 +569,24 @@ class MPSgeneric(ABC):
         transf = T.T
       else:
         assert x0 == xs[iO+1]
+
+  def expvsum(self, *args):
+    """Expectation value of a sum of local operators
+    Sequence of arguments is:
+    * parse string as in local_operator_expv
+    * operator
+    * (first) site"""
+    # TODO lterm & rterm as in other expvs?
+    assert len(args) % 3 == 0
+    nO = len(args)//3
+    parses = args[::3]
+    ops = args[1::3]
+    xls = args[2::3]
+    if self.iscanon():
+      return sum(self.local_operator_expv(parses[i],ops[i],xls[i],
+        lterm=True,rterm=True) for i in range(nO))
+    else:
+      return self._expvsum_nocanon(parses, ops, xls)
 
 class MPOgeneric:
   """MPO for a finite segment -- neither explicitly PBC nor OBC"""
@@ -1413,3 +1433,12 @@ class RightTransferManaged(RightTransfer):
   #  if hasattr(self,'discard') and self.discard == True:
   #    with self.manager.shelfcontext() as shelf:
   #      del shelf[self.id.hex]
+
+# Difference between Schmidt "vectors" as used by optimization algorithms
+def adiff(v1,v2):
+  # RMS difference between two (sorted) lists of potentially different size 
+  numel = max(len(v1),len(v2))
+  a1 = np.pad(sorted(v1),(numel-len(v1),0))
+  a2 = np.pad(sorted(v2),(numel-len(v2),0))
+  return np.linalg.norm(a1-a2)
+

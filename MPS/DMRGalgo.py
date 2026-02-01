@@ -1,16 +1,14 @@
 from .mpsbasic import *
 from .. import config
 from ..management import BondOptimizer,GeneralManager,PseudoShelf,safedump
-import os,os.path,shutil
-import pickle,shelve,contextlib,itertools
-import logging
+import os,os.path
+import pickle
 import numpy as np
 from copy import copy,deepcopy
-from collections.abc import MutableMapping
 
 # Commands that can be used within supervisor to initialize a state
 
-def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
+def open_manager(Hamiltonian, chis=None, file_prefix=None, savefile='auto',
     override=True, override_chis=True, resume_from_old=False, use_shelf=False,
     **dmrg_kw):
   """Initialize optimization manager
@@ -25,6 +23,10 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
   'resume_from_old' indicates that the filename may point to a saved status
     consisting of (psi, (chi, single_or_double, niter))
   remaining arguments  as in DMRGManager()"""
+  if chis is None:
+    args = [Hamiltonian]
+  else:
+    args = [Hamiltonian,chis]
   if savefile and (savefile != 'auto' or file_prefix):
     # Check existing
     filename = (file_prefix+'.p') if savefile=='auto' else savefile
@@ -37,6 +39,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
       except:
         config.logger.exception('Manager file apparently corrupted') 
         if 'savesafe' in dmrg_kw and dmrg_kw['savesafe']:
+          # TODO incorrect in case of savesafe from toml table
           config.logger.warning('Reloading from backup')
           Mngr = pickle.load(open(filename+'.old','rb'))
         else:
@@ -48,7 +51,7 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
           chi,ds,niter = sv
           assert chi in chis
           dmrg_kw['psi0'] = psi
-          Mngr = DMRGManager(Hamiltonian, chis, file_prefix=file_prefix,
+          Mngr = DMRGManager(*args, file_prefix=file_prefix,
             savefile=savefile, use_shelf=use_shelf, **dmrg_kw)
           Mngr.restorecanonical()
           idx = chis.index(chi)
@@ -120,12 +123,13 @@ def open_manager(Hamiltonian, chis, file_prefix=None, savefile='auto',
         else:
           Mngr.setdboff(False)
       return Mngr
-  return DMRGManager(Hamiltonian, chis, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
+  return DMRGManager(*args, use_shelf=use_shelf, file_prefix=file_prefix, savefile=savefile, **dmrg_kw)
 
 
 class DMRGManager(BondOptimizer):
   """Optimizer for DMRG"""
   _default_file = 'MPS/dmrgdefaults.toml'
+  _logname = 'DMRG'
   def __init__(self, Hamiltonian, *args, psi0=None, **kw_args):
     """MPO Hamiltonian; list of bond dimensions (or single bond dimension)
       psi0 if provided is the initial state
@@ -135,7 +139,7 @@ class DMRGManager(BondOptimizer):
         use None or null string to avoid autosave when saving steps
       Edelta & schmidtdelta are tolerance levels for energy & schmidt-index
         comparisons, respectively
-      ncanon1 & ncanon2 give how frequetly to restore canonical form during
+      ncanon1 & ncanon2 give how frequently to restore canonical form during
         single & double update portion respectively
       nsweep1 & nsweep2 give (maximum) numbers of sweeps during
         single & double updates respectively
@@ -169,14 +173,10 @@ class DMRGManager(BondOptimizer):
       self.chis = None
 
     super().__init__(**kw_args)   
-    if self.chis is None:
-      if 'chis' in self.settings_man.global_settings:
-        self.chis = list(self.settings_man.global_settings['chis'])
-      else:
-        self.chis = [self.settings_man.global_settings['chi']]
-    else:
-      # TODO feels redundant
-      self.set_setting('chis',self.chis)
+    #if self.chis is None:
+    # Should be covered by _configure_stage_settings
+    # TODO feels redundant
+    self.set_setting('chis',self.chis)
 
 
   @property
@@ -213,13 +213,6 @@ class DMRGManager(BondOptimizer):
                         'resettol':self.resettol}
     self.callables = {}
 
-  def _initlog(self,level=None):
-    # TODO was there a reason for defaulting to 10 instead of parent level?
-    # TODO move to superclass w/ name constant?
-    self.logger = config.logger.getChild('DMRG')
-    if level is not None:
-      self.logger.setLevel(level)
-
   def _update_state_to_version(self, state):
     if '_DMRGManager__version' not in state:
       state['_DMRGManager__version'] = 'void'
@@ -242,6 +235,7 @@ class DMRGManager(BondOptimizer):
           self.transfLs[n].T = T0.T
       elif 'database' not in state:
         # TODO depricate
+        import shelve
         if self.dbfile:
           # Need to re-load before unloading
           self.transfRs = []
@@ -339,12 +333,11 @@ class DMRGManager(BondOptimizer):
     # to invoke
     super()._update_state_to_version(state)
     self.__version = '1.1'
-    self.chirules = {}
-    self._initfuncs()
+    #self._initfuncs()
     if self.__version != state['_DMRGManager__version']:
       self.logger.info('DMRGManager version updated from %s to %s',
         state['_DMRGManager__version'],self.__version)
-    self.supervisors = 'paused'
+    #self.supervisors = 'paused'
 
   # "Registered objects" (here transfer vectors)
 
@@ -693,7 +686,7 @@ class DMRGManager(BondOptimizer):
 
   def baseargs(self):
     """Define arguments for base supervisor"""
-    return self.chis, self.N, self.settings
+    return self.chis, self.N
 
 def baseSupervisor(chis, N, settings, state=None):
   if state is None:
@@ -804,13 +797,6 @@ def singleSweepSupervisor(N, settings, state=None):
     n -= 1
   yield 'gaugeat', (0,gauge)
   yield 'complete', ()
-
-def adiff(v1,v2):
-  # RMS difference between two (sorted) lists of potentially different size 
-  numel = max(len(v1),len(v2))
-  a1 = np.pad(sorted(v1),(numel-len(v1),0))
-  a2 = np.pad(sorted(v2),(numel-len(v2),0))
-  return np.linalg.norm(a1-a2)
 
 def ortho_manager(Hamiltonian, chis, npsis, file_prefix=None, savefile='auto',
     override=True, override_chis=True, resume_from_old=False, use_shelf=False,
@@ -1815,7 +1801,7 @@ class DMRGOrthoManager(DMRGManager):
     return list(self.psilist)
 
   def baseargs(self):
-    return self.chis, self.N, self.npsi_tot, self.npsis, self.settings
+    return self.chis, self.N, self.npsi_tot, self.npsis
 
 def orthoBaseSupervisor(chis, N, npsitot, np0, settings, state=None):
   if state is None:

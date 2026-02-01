@@ -31,11 +31,13 @@ def expm_128(M):
   """Matrix exponential for float128 and complex256"""
   real = (M.dtype == REALTYPE)
   assert real or (M.dtype == CPLXTYPE)
+  expA = np.identity(M.shape[0],dtype=(REALTYPE if real else CPLXTYPE))
+  if linalg.norm(M) == 0:
+    return expA
   # Scaling part
   s = max(0,int(np.ceil(np.log(linalg.norm(M)/theta_n_expm128)/np.log(2))))
   A = M/2**s
   # Taylor expansion part: Start with power 0
-  expA = np.identity(M.shape[0],dtype=(REALTYPE if real else CPLXTYPE))
   Ai = A
   for n in range(1,n_expm128):
     expA += Ai
@@ -605,15 +607,46 @@ class SU2(Group):
     h = np.array(h,dtype=REALTYPE)
     thetag = linalg.norm(g)
     thetah = linalg.norm(h)
+    if thetag == 0:
+      return h
+    elif thetah == 0:
+      return g
     gnorm = g/thetag
     hnorm = h/thetah
     sg = np.sin(thetag/2)
     cg = np.cos(thetag/2)
     sh = np.sin(thetah/2)
     ch = np.cos(thetah/2)
-    phi = np.arccos(cg*ch - gnorm.dot(hnorm)*sg*sh)
+    cphi = cg*ch - gnorm.dot(hnorm)*sg*sh
+    if cphi > 1:
+      # This seems too common
+      assert cphi-1 < 1e-15
+      # Treat as identity with negligible overflow error (TODO warn?)
+      gh = gnorm*sg*ch + hnorm*cg*sh + np.cross(gnorm,hnorm)*sg*sh
+      assert linalg.norm(gh) < 1e-15
+      return (0,0,0)
+    if 1 + cphi < 1e-3:
+      # Degenerate representation of central element may cause numerical
+      # instability; rotate & unrotate to avoid
+      if cg <= ch: # g is further from the identity
+        gminus = (thetag - 2*pi)*gnorm
+        ghminus = self.compose(gminus, h)
+      else:
+        hminus = (thetah - 2*pi)*hnorm
+        ghminus = self.compose(g, hminus)
+      thetagh = linalg.norm(ghminus)
+      if thetagh == 0:
+        if cg <= ch:
+          ghnorm = gnorm
+        else:
+          ghnorm = hnorm
+      else:
+        ghnorm = np.array(ghminus,dtype=REALTYPE) / thetagh
+      return tuple((thetagh - 2*pi) * ghnorm)
+    phipi = np.arccos(cphi)/pi
+    # Corrected for singular case by use of sinc
     gh = gnorm*sg*ch + hnorm*cg*sh + np.cross(gnorm,hnorm)*sg*sh
-    return tuple(2*phi/np.sin(phi)*gh)
+    return tuple(2/np.sinc(phipi)*gh)
 
 
 def takagi_stable(S):

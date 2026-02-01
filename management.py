@@ -9,6 +9,7 @@ from .settingsman import SettingsManager
 class GeneralManager:
   """Base class for optimization managers"""
   _initializers = ()
+  _logname = 'algorithm'
 
   def __init__(self, savefile='auto', file_prefix=None,
       settings_from=[], **kw_args):
@@ -41,6 +42,7 @@ class GeneralManager:
     if self.use_shelf:
       assert self.filename
       # Use autosave filename but with extension .db instead of .p
+      # TODO should be able to put database path somewhere else
       self.dbpath = self.filename[:-1]+'d'
       self.database = PseudoShelf(self.dbpath)
     else:
@@ -64,12 +66,41 @@ class GeneralManager:
 
   @abstractmethod
   def _initfuncs(self):
+    """Here we set:
+    * supfunctions: map from supervisor labels to the corresponding functions
+    * supcommands:  map from valid commands to the corresponding functions
+      (generally bound methods)
+    * callables:    any optional, user-definable functions to be called within
+      manager sub-processes
+    * sub_managers: map from sub-manager names to tuple
+      (loading info:tuple, pre-processing/loading method:callable,
+        post-processing method:callable)
+      - loader should accept loading info + settings manager + 
+        additional args supplied by supervisor;
+        returns supervisor ready to run (includes unpickling if necessary)
+      - post-processor should accept return value of sub-manager
+        (assumed tuple!) + additional supervisor args (same supplied to loader)
+      - sends return value of post-processor back to supervisor"""
+    # TODO why provide loading info to loader instead of
+    # constructing loader as partial function?
     pass
+
+  def _initlog(self,level=None):
+    # TODO was there a reason for defaulting to 10 instead of parent level?
+    # TODO is _logname set automatically on unpickling?
+    self.logger = config.logger.getChild(self._logname)
+    if level is not None:
+      self.logger.setLevel(level)
 
   def _configure_settings(self, settings_from, kw_args, reconfig=False):
     # TODO way of saying "this general setting does not override rules"?
     man_args = [kw_args]
-    if bool(settings_from) and isinstance(settings_from[0],str):
+    if isinstance(settings_from, SettingsManager):
+      # Currently for specific case of constructing submanager 
+      self.settings_man = settings_from
+      self.settings = {}
+      return
+    elif bool(settings_from) and isinstance(settings_from[0],str):
       if len(settings_from) != 2:
         raise ValueError('Expected filename-key pair as first element of '
           'settings_from, got string "%s"'%settings_from[0])
@@ -96,6 +127,11 @@ class GeneralManager:
     """Read off information about stages obtained from settings manager"""
     pass
 
+  @property
+  def _configs_id(self):
+    # Name for settings manager to use to find configurations
+    return self.__class__.__name__
+
   def set_setting(self, key, value, override=True, nocreate=False):
     """Specify a setting "key", set to value (for all stages)
     If override, wipes all conditional settings for key
@@ -110,6 +146,33 @@ class GeneralManager:
     """As with set_setting but provide key-value pairs as dict"""
     for key,value in new_settings.items():
       self.set_setting(key, value, **kw_args)
+
+  def _attr_from_settings(self, name, key, func, *kfpairs, override=False):
+    """Set a field from a global setting:
+    key is name of setting, function determines how the field is derived;
+    kfpairs list fallbacks if key is not present.
+    key may also be a list of settings.
+    If just a single setting, func may be None to indicate the identity.
+    Unless override, keeps value of field if not None"""
+    if not override and hasattr(self, name) and getattr(self, name) is not None:
+      return getattr(self, name)
+    globsets = self.settings_man.global_settings
+    for keys,f in zip((key,) + kfpairs[::2], (func,) + kfpairs[1::2]):
+      if isinstance(keys,str):
+        if keys not in globsets or globsets[keys] is None:
+          continue
+        val = globsets[keys]
+        if f is not None:
+          val = f(val)
+        setattr(self, name, val)
+        break
+      if not all(k in globsets and globsets[k] is not None for k in keys):
+        continue
+      vals = [globsets[k] for k in keys]
+      setattr(self, name, f(*vals))
+      break
+    # If attribute not set by this point, will be a problem
+    return getattr(self, name)
 
   def resetsettings(self,settings_from=[],stage_override=True,**kw_args):
     """Accepts settings arguments as in constructor"""
@@ -163,6 +226,10 @@ class GeneralManager:
   def savelevel(self, value):
     self.settings_man.global_settings['savelevel'] = value
 
+  @abstractmethod
+  def savestep(self):
+    pass
+
   def __getstate__(self):
     state = self.__dict__.copy()
     del state['supfunctions']
@@ -179,9 +246,9 @@ class GeneralManager:
     # load as dict & let conversion to new format occur in later processing
     if not config.loadonly:
       self._update_state_to_version(state)
-    #self.chirules = {}
-    #self._initfuncs()
-    #self.supervisors = 'paused'
+      # TODO why were these in the child functions?
+      self._initfuncs()
+      self.supervisors = 'paused'
 
   @abstractmethod
   def _update_state_to_version(self, state):
@@ -199,16 +266,23 @@ class GeneralManager:
     # Child must update stage variables (e.g. bond dimension)   
     self._update_stage(*stage_data)
     self._evaluate_settings(*stage_data)
+    self._evaluate_with_settings()
 
   def _evaluate_settings(self, *stage_data):
     # May pass without stage data in which case will use current stage
     if not stage_data:
       stage_data = self._get_stage_data()
     self.settings.clear()
+    self.settings.update(self.settings_man.global_settings)
     stage_dict = self.query_stage(*stage_data)
     self.settings.update(self.settings_man.eval_at_stage(stage_dict))
     self.logger.debug('Settings updated to:'+len(self.settings)*'\n\t%s = %s',
       *sum(self.settings.items(),()))
+
+  def _evaluate_with_settings(self):
+    """To be overridden if any additional actions need to be taken after
+    settings are evaluated"""
+    pass
 
   @abstractmethod
   def query_stage(self, *stage_data):
@@ -223,6 +297,10 @@ class GeneralManager:
   def _get_stage_data(self):
     """Retrieve "stage data" to be passed to query_stage & _update_stage"""
     pass
+
+  @property
+  def current_stage(self):
+    return self.query_stage(*self._get_stage_data())
 
   # "Registered objects" --
   # all management thereof should pass through these functions
@@ -297,9 +375,12 @@ class GeneralManager:
     if statespec is not None:
       self._updateROstate(statespec)
 
-  @abstractmethod
+  # By default no registered objects
+  _nullROstate = None
+
+  # MUST be overridden by subclasses with nontrivial RO states
   def _validateROstate(self, spec):
-    pass
+    assert spec is None
 
   def _validateRO(self, key):
     pass
@@ -307,9 +388,9 @@ class GeneralManager:
   def _ROcheckdbentries(self, key):
     pass
 
-  @abstractmethod
+  # MUST be overridden by subclasses with nontrivial RO states
   def ROstatelist(self, statespec):
-    pass
+    return []
 
   def setdbon(self, dbpath=None):
     if not dbpath:
@@ -475,6 +556,27 @@ class GeneralManager:
   def is_initializer(self, cmd, statcmp, *args):
     return cmd in self._initializers
 
+  def _sub_manager(self, level, label, *processing_args):
+    """Run a sub-manager"""
+    load_info, loader, postproc = self.sub_managers[label]
+    self.logger.info('Initializing or loading sub-manager "%s"',label)
+    setman = self.settings_man.promote_subman(label)
+    # Any settings dependent on values obtained at runtime can be set
+    # in loader
+    man = loader(*load_info,setman,*processing_args)
+    setman.owner = man
+    # TODO pass "global" settings
+    try:
+      rv = man.run()
+    except SystemExit as e:
+      # TODO test save-and-quit
+      self.logger.log(30, 'Saving and quitting during sub-manager execution')
+      self._subman_file = man.filename
+      self.save()
+      raise e
+    self.logger.info('Sub-manager "%s" completed',label)
+    return postproc(*rv, *processing_args)
+
   def _do_execution(self, send_value, rstrict=None, statcmp=None):
     """Obtain & execute commands from "supervisor" subroutines"""
     level = len(self.supervisors)
@@ -562,10 +664,15 @@ class GeneralManager:
       else:
         self.suplabels[level] = label
         self.logger.log(10, 'Resuming level-%s supervisor %s',level+1,label)
+    elif cmd == 'sub-manager':
+      # New sub-manager
+      return self._sub_manager(level,*args)
     elif cmd == 'announce':
       # Announcement
       # TODO logging levels?
-      config.streamlog.log(30, args)
+      if isinstance(args,str):
+        args = (args,)
+      config.streamlog.log(30, *args)
     else:
       # Algorithm-specific options
       if rstrict is not None and not self.is_initializer(cmd,statcmp,*args) \
@@ -593,7 +700,7 @@ class GeneralManager:
     if not self.supervisors:
       # Initialize base
       self.logger.log(10, 'Initializing base supervisor')
-      self.supervisors.append(self.supfunctions['base'](*self.baseargs()))
+      self.supervisors.append(self.supfunctions['base'](*self.baseargs(),self.settings))
       self.suplabels.append('base')
       self.supstatus.append(None)
     elif self.supervisors == 'paused':
@@ -602,7 +709,8 @@ class GeneralManager:
       self.resume_message()
       self._evaluate_settings()
       # Initialize saved supervisors
-      sup = self.supfunctions['base'](*self.baseargs(), state=self.supstatus[0])
+      sup = self.supfunctions['base'](*self.baseargs(),self.settings,
+        state=self.supstatus[0])
       self.supervisors = [sup]
       level = 0
       old_status = list(self.supstatus)
@@ -626,12 +734,9 @@ class BondOptimizer(GeneralManager):
   """Optimization manager with bond-dimension dependence"""
 
   def _configure_stage_settings(self, override=False):
-    if not override and hasattr(self, 'chis') and self.chis:
-      return
-    elif 'chis' in self.settings_man.global_settings:
-      self.chis = list(self.settings_man.global_settings['chis'])
-    elif 'chi' in self.settings_man.global_settings:
-      self.chis = [self.settings_man.global_settings['chi']]
+    self._attr_from_settings('chis', 'chis', None, 'chi', lambda c:[c],
+      override=override)
+    # TODO select chi when changed
 
   def _update_stage(self, chi):
     self.chiindex = self.chis.index(chi)

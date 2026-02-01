@@ -1,0 +1,62 @@
+[TEBDManager]
+stage-vars = [ "chi", "timestep", "index", "back_index" ]
+system-vars = [ "N" ]
+str-opts = [ "saveat" ,"sequence"]
+globals = [ "chi", "chis", "timestep", "timesteps", "stages", "saveat"]
+# 'stages' may be set as list of (chi,timestep) pairs
+
+[TEBDManager.defaults]
+# Tolerance level for energy comparisons 
+Edelta = 1e-8
+# Tolerance level for schmidt-index comparisons
+schmidtdelta = 1e-6
+# Number of sweeps between restore-canonical
+ncanon = 10
+# Maximum number of sweeps per stage
+nsweep = 1000
+# Number of sweeps between energy computations
+nE = "ncanon"
+# Tolerance for SVD in restore-canonical
+tolc = 1e-12
+# Tolerance for SVD in update
+tol = 1e-12
+# Form of Trotter decomposition:
+# "sweep" is all terms, sequentially & separately, to allow for 'sweeps'
+#   where canonical center follows location of update
+# "alternate" groups terms into even & odd
+#   (in this case ncanon=0 will restore canonical form between groups)
+sequence = "sweep"
+# Order of Trotter decomposition
+order = 2
+# Save after completing optimization given bond dimension ('chi'),
+#   timestep ('timestep'), all stages ('all'), only final stage ('final'),
+#   never ('none' or None)
+saveat = 'chi'
+
+[METTSManager]
+stage-vars = [ "gen_index", "back_index" ]
+system-vars = [ "N" ]
+str-opts = [ "sequence" ]
+globals = [ "chi", "chis", "timestep", "timesteps", "stages" ]
+sub-mans = { evolver = "TEBDManager" }
+[METTSManager.sub-keys.evolver]
+ncanon = "ncanon"
+nsweep = "nsweep"
+nE = "nE"
+tolc = "tolc"
+tol = "tol"
+sequence = "sequence"
+order = "order"
+
+[METTSManager.defaults]
+ngen = 100
+bakein = 0
+ncanon = 10
+tolc = 1e-12
+tol = 1e-12
+sequence = "sweep"
+order = 2
+[METTSManager.defaults.evolver]
+Edelta = 0
+schmidtdelta = 0
+saveat = 'none'
