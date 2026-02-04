@@ -1,17 +1,23 @@
 My current tensor-network library
 
 ## Design principles
-1. **Data encapsulation and basis independence:**
+1. ### Data encapsulation and basis independence:
    Many tensor-network operations create a new basis (for a "virtual" or "bond"
    space) that doesn't have a lot of immediate physical meaning and often even
    has a certain amount of arbitrariness. This means that relatively few of the
    many operations one might normally perform on multidimensional arrays are valid,
    which is part of why I find it preferable to keep the internal array
-   representation of    a tensor largely hidden from the user. This even includes
-   the order of axes (though that's also a preference for referring to indices in
-   a way that references either their function or placement on a diagram, which I
-   find much more readable than integer axis labels.)
-2. **Let someone else do the heavy lifting:** The vast majority of time in a given
+   representation of a tensor largely hidden from the user.
+2. ### Diagrammatics:
+   When Einstein notation becomes unwieldy on paper, we turn to tensor-network
+   diagrams; and if it's gotten to that point then keeping track of
+   axes by their order alone will be even
+   harder. So I label axes (usually based on either their function or placement
+   on a diagram) and manipulate those tensors through those labels, keeping
+   the internal axis order largely hidden as well. This also allows for a sort
+   of mini-language defined for building and contracting networks.
+3. ### Let someone else do the heavy lifting:
+   The vast majority of time in a given
    tensor-network algorithm is usually spent in a small number of routines
    (and sometimewhere the processes of saving
    progress s just one, namely tensor contraction). Fast tensor-network
@@ -21,7 +27,8 @@ My current tensor-network library
    offers, to handle them for you. A lot of people have put a lot of work into
    making fast, stable numerical linear algebra routines, and that frees up
    someone like me to focus on the higher-level stuff.
-3. **Modularity:** A major goal of mine is to make it easier to tweak algorithms
+4. ### Modularity:
+   A major goal of mine is to make it easier to tweak algorithms
    (partly to find the most efficient version, but maybe more than that out of the
    recognition that what's most efficient may depend on context). In recent
    versions of this codebase, that has meant adding a
