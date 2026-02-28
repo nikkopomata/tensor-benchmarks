@@ -132,7 +132,10 @@ def _integralize(arr):
   farr = iarr.reshape(-1)
   assert len(farr)
   p,q = _DC_integralize(farr,len(farr))
-  return Fraction(p,q),iarr
+  if p == 0:
+    return Fraction(1),np.zeros_like(iarr)
+  else:
+    return Fraction(p,q),iarr
 
 def _DC_integralize(l,s):
   # Recursive divide-and-conquer approach to integralizing flat array l of
@@ -263,7 +266,7 @@ def _compatibilize_inputs(*args, outputs=None, blanks=None,
         if isdup[i]:
           continue
         else:
-          ibase.append((arg if arg.base is None else arg.base), {i})
+          ibase.append(((arg if arg.base is None else arg.base), {i}))
       else:
         arg = rarray(arg)
         rnew[i] = arg
@@ -592,9 +595,14 @@ class RationalArray(numpy.lib.mixins.NDArrayOperatorsMixin):
   def _float_ufunc(self, ufunc, method, dtype, *inputs, **kwargs):
     # Helper for __array_ufunc__ that converts self & any other RationalArray
     # arguments to floating-point
-    if method == 'at':
+    if method == 'at' and isinstance(inputs[0],RationalArray):
       # Requires conversion, so can't do that
       return NotImplemented
+    if 'out' in kwargs and any(isinstance(oarr,RationalArray) for oarr in kwargs['out']):
+      return NotImplemented
+    if dtype is None or dtype == np.dtype(object):
+      # Called because of ufunc, not because of dtype
+      dtype = np.dtype(float)
     in_fp = []
     for arg in inputs:
       if isinstance(arg,RationalArray):
@@ -1423,6 +1431,12 @@ def vstack(iarrays, **kwargs):
 @_implements_catenator(np.concatenate)
 def concatenate(iarrays, **kwargs):
   return np.concatenate(iarrays, **kwargs)
+
+@_implements(np.append)
+def append(arr,values,axis=None):
+  factor, (iarr0,ivals) = _compatibilize_inputs(arr, values)
+  iarr = np.append(iarr0,ivals,axis=axis)
+  return RationalArray(factor, iarr)
 
 @_implements(np.zeros)
 def rzeros(shape, **kwargs):

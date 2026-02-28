@@ -162,7 +162,7 @@ class Group(metaclass=GroupType):
     return self._Ss[r]
 
   def _fS(self, r):
-    raise NotImplementedError
+    raise NotImplementedError()
 
   def fusionCG(self, r1, r2):
     """Retrieve fusion decomposition, Clebsch-Gordan coefficients
@@ -170,28 +170,61 @@ class Group(metaclass=GroupType):
     if (r1,r2) not in self._fusion:
       self.verify_rep(r1)
       self.verify_rep(r2)
-      CG0 = {}
-      CG1 = {}
-      fusion = []
-      for k,R in self._ffusion(r1,r2):
-        if R is None:
-          # Identity transformation; one or both should be 1d
-          CG0[k] = None
-          CG1[k] = None
-          fusion.append((k,1))
-        else:
-          fusion.append((k,R.shape[3]))
-          CG0[k] = R
+      fCG = self._ffusion(r1,r2)
+      if fCG is NotImplemented:
+        # Children are allowed to punt in two cases:
+        # - one of the reps is quaternionic in "secondary"/"in" form
+        # - reps are given in non-preferred order
+        if self.indicate(r1) == -2:
+          # Apply charge-conjugator
+          r1d = self.dual(r1)
+          fusion,CGd = self.fusionCG(r1d,r2)
+          CG0 = {}
+          CG1 = {}
+          S = self.S(r1d)
+          for k,W in CGd.items():
+            if W is None:
+              # Identity (should be r1d x 1 -> r1d)
+              CG0[k] = np.expand_dims(S.T,(1,3))
+              CG1[k] = np.expand_dims(S.T,(0,3))
+            else:
+              CG0[k] = np.tensordot(S,W,(0,0))
+              CG1[k] = CG0[k].transpose((1,0,2,3))
+          self._CG[r1,r2] = CG0
+          self._fusion[r1,r2] = fusion
           if r1 != r2:
-            CG1[k] = R.transpose((1,0,2,3))
-      self._CG[r1,r2] = CG0
-      self._fusion[r1,r2] = fusion
-      if r1 != r2:
-        self._CG[r2,r1] = CG1
-        self._fusion[r2,r1] = fusion
-      return fusion, CG0
-    else:
-      return list(self._fusion[r1,r2]), dict(self._CG[r1,r2])
+            self._CG[r2,r1] = CG1
+            self._fusion[r2,r1] = fusion
+        elif self.indicate(r2) == -2:
+          # Rely on code block above
+          self.fusionCG(r2,r1)
+          # Note that this means when both r1 & r2 are "secondary" quaternionic,
+          # CG may be produced from 3 recursive calls
+        else:
+          self.fusionCG(r2,r1)
+
+      else:
+        CG0 = {}
+        CG1 = {}
+        fusion = []
+        for k,R in fCG:
+          if R is None:
+            # Identity transformation; one or both should be 1d
+            CG0[k] = None
+            CG1[k] = None
+            fusion.append((k,1))
+          else:
+            fusion.append((k,R.shape[3]))
+            CG0[k] = R
+            if r1 != r2:
+              CG1[k] = R.transpose((1,0,2,3))
+        self._CG[r1,r2] = CG0
+        self._fusion[r1,r2] = fusion
+        if r1 != r2:
+          self._CG[r2,r1] = CG1
+          self._fusion[r2,r1] = fusion
+    assert len(self._CG[r1,r2])
+    return list(self._fusion[r1,r2]), dict(self._CG[r1,r2])
 
   @abstractmethod
   def _ffusion(self, r1, r2):
@@ -215,6 +248,8 @@ class Group(metaclass=GroupType):
 
   def irrepmatrix(self, r, g):
     """Retrieve matrix representation of irrep r at group element g"""
+    # TODO allow for different ways of identifying group elements
+    # (also applies to Haargen, compose)
     self.verify_rep(r)
     if self.indicate(r) == -2:
       return self._firrep(self.dual(r),g).conj()
@@ -250,11 +285,11 @@ class Group(metaclass=GroupType):
 
   def Haargen(self):
     """Randomly sample from valid group elements using Haar measure. Optional"""
-    raise NotImplementedError
+    raise NotImplementedError()
 
   def compose(self, g, h):
     """Return element produced by the composition of g and h. Optional"""
-    raise NotImplementedError
+    raise NotImplementedError()
 
   def product(self, H):
     """Direct product with H"""
@@ -547,27 +582,27 @@ class SU2(Group):
           k0 = max(0, jdiff+n1, jsum-n2)
           k1 = min(jsum, n1, smax-n2)+1
           for k in range(k0, k1):
-            Wk[n1,n2,n] += (-1)**k/REALTYPE(np.math.factorial(jsum-k) \
-                                  * np.math.factorial(n1-k) \
-                                  * np.math.factorial(smax-n2-k) \
-                                  * np.math.factorial(k-n1-jdiff) \
-                                  * np.math.factorial(k+n2-jsum) \
-                                  * np.math.factorial(k))
+            Wk[n1,n2,n] += (-1)**k/REALTYPE(math.factorial(jsum-k) \
+                                  * math.factorial(n1-k) \
+                                  * math.factorial(smax-n2-k) \
+                                  * math.factorial(k-n1-jdiff) \
+                                  * math.factorial(k+n2-jsum) \
+                                  * math.factorial(k))
       # Factor varying independently by m
-      arr2 = np.sqrt(np.array([np.math.factorial(n2) for n2 in range(smax+1)],
+      arr2 = np.sqrt(np.array([math.factorial(n2) for n2 in range(smax+1)],
         dtype=REALTYPE))
       arr1 = arr2[:smin+1].copy()
       arr3 = arr2[:s//2+1].copy()
       arr1 *= arr1[::-1]
       arr2 *= arr2[::-1]
-      arr3 *= np.sqrt(np.array([np.math.factorial(s-n) for n in range(s//2+1)],
+      arr3 *= np.sqrt(np.array([math.factorial(s-n) for n in range(s//2+1)],
         dtype=REALTYPE))
       Wk *= np.tensordot(np.tensordot(arr1,arr2,0),arr3,0)
 
-      Wk *= np.sqrt((s+1)*np.math.factorial(jsum) \
-             * np.math.factorial((s-smin+smax)//2) \
-             * np.math.factorial((s+smin-smax)//2) \
-             / REALTYPE(np.math.factorial((s+smin+smax)//2+1)))
+      Wk *= np.sqrt((s+1)*math.factorial(jsum) \
+             * math.factorial((s-smin+smax)//2) \
+             * math.factorial((s+smin-smax)//2) \
+             / REALTYPE(math.factorial((s+smin+smax)//2+1)))
       # Negative Sz
       if s != 0:
         Wk = np.concatenate((Wk, (-1)**jsum * Wk[::-1,::-1,(s-1)//2::-1]), 2)
@@ -1043,6 +1078,8 @@ class SumRepresentation(links.VectorSpace,metaclass=GroupDerivedType):
     for k,n in self._decomp:
       d = self.group.dim(k)
       R = self.group.irrepmatrix(k,g)
+      if self.real:
+        R = R.real
       for i in range(n):
         mat[idx:idx+d,idx:idx+d] = R
         idx += d

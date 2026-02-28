@@ -1,6 +1,6 @@
-from liegroups import *
+from .liegroups import *
 from fractions import *
-from rationallinalg import *
+from .rationallinalg import *
 from numbers import Number
 from copy import copy,deepcopy
 # This module uses a lot of dtype=Fraction. It doesn't mean anything different
@@ -33,8 +33,8 @@ def solve_overcomplete(M, B):
         factor = reducer[ileft,ileft]
         reducer[ileft] /= factor
         solver[ileft] /= factor
-  reducer = reducer[:m]
-  solver = solver[:m]
+  reducer = reducer[:m].rereduce()
+  solver = solver[:m].rereduce()
   # Now zero remaining elements
   for i in range(m-2,-1,-1):
     for j in range(i+1,m):
@@ -42,7 +42,7 @@ def solve_overcomplete(M, B):
       if shift:
         reducer[i] -= shift*reducer[j]
         solver[i] -= shift*solver[j]
-  return solver
+  return solver.rereduce()
 
 def takagi_rational(S, normsq):
   # TODO untested, not in terms of RationalArray
@@ -53,13 +53,12 @@ def takagi_rational(S, normsq):
   # entry, sqrt(normsq)^-1 * U * Delta^1/2 is unitary)
   N = S.shape[0]
   if not no_strict_checks:
-    # Raise right index (?)
-    Ssym = normsq[:,None] * S
+    Ssym = S.raise_index(normsq,1)
     assert np.all(Ssym.T == Ssym)
-    assert Ssym.dot(Ssym) == np.zeros(N,dtype=int)
-  URe = np.zeros((N,0),dtype=object)
-  UIm = np.zeros((N,0),dtype=object)
-  normnew = np.zeros((0,),dtype=object)
+    assert np.all(S.dot(S) == reye(N))
+  URe = rzeros((N,0))
+  UIm = rzeros((N,0))
+  normnew = rzeros((0,))
   hasim = False
   for k in range(N):
     for sgn in (1,-1):
@@ -69,7 +68,7 @@ def takagi_rational(S, normsq):
       normy = y.dot(ylow)
       # Orthogonalize
       if k:
-        norminv = Fraction(1)/normnew
+        norminv = normnew.reciprocal()
         coeffR = URe.T.dot(ylow)
         normy -= coeffR.dot(norminv*coeffR)
         if hasim:
@@ -84,18 +83,20 @@ def takagi_rational(S, normsq):
         if hasim:
           yR -= UIm.dot(norminv*coeffI)
           yI = URe.dot(norminv*coeffI) - UIm.dot(norminv*coeffR)
+          yI.rereduce()
       else:
         yR = y
+      yR.rereduce()
       if not hasim:
-        yI = np.zeros((N,),dtype=Fraction)
+        yI = rzeros((N,))
       nout,nrad = sqrt_reduce(normy)
       normnew = np.append(normnew,nrad)
       if sgn == -1:
         # Multiply by i
         yR,yI = -yI,yR
         hasim = True
-      URe = np.hstack((URe,yR/nout))
-      UIm = np.hstack((UIm,yI/nout))
+      URe = np.hstack((URe,yR[:,None]/nout))
+      UIm = np.hstack((UIm,yI[:,None]/nout))
       break # Skip other sign if applicable
   if not no_strict_checks:
     # Unitarity
@@ -109,14 +110,14 @@ def takagi_rational(S, normsq):
     rhs = np.diag(normnew)
     assert np.all(lhs == rhs)
     # Decomposition
-    UReR = normnew[:,None] * URe.T
-    UImR = normnew[:,None] * UIm.T
+    UReR = URe.T.raise_index(normnew,0)
+    UImR = UIm.T.raise_index(normnew,0)
     lhs = URe.dot(UReR)
     if hasim:
       lhs -= UIm.dot(UImR)
       assert np.all(URe.dot(UImR) == -UIm.dot(UReR))
     assert np.all(lhs == Ssym)
-  return (URe,UIm),normnew
+  return (URe.rereduce(),UIm.rereduce()),normnew
 
 def plus_assign(d,k,arr):
   if k in d:
@@ -283,6 +284,9 @@ class RationalRepresentation(HighestWeightRepresentation):
               else:
                 cmp += f.dot(A.T)
           assert np.all(cmp == reye(cmp.shape[0]))
+    # After this "_generators_by_depth" should not be needed,
+    # kill them to avoid confusion
+    self._generators_by_depth = None
 
   def _construct_from_dual(self, dual):
     assert dual.FSI == 0
@@ -386,15 +390,24 @@ class RationalRepresentation(HighestWeightRepresentation):
   def dual(self):
     return self._group.get_ratrep(self._dual_weight)
 
-  def fp_chevalley(self, which, i, precision='double', unitary=True):
-    # Chevalley generators (which='h','e','f'), evaluated as floats in a 
-    # scipy.sparse array
+  def fp_chevalley(self, which, i, precision='double', unitary=True,
+      realize=False):
+    """Chevalley generators (which='h','e','f'), evaluated as floats in a 
+    scipy.sparse array
+    If unitary, converts to unitary form; if realize and irrep is real,
+    also applies change-of-basis to real matrix elements
+      (in compact real form; note that we are working in split form which
+      has real matrix elements that become complex)"""
     shape = (self.dim,self.dim)
     if which == 'h':
       diag = []
       for mu,d in zip(self.weights,self.degeneracies):
         diag.extend(d*[mu[i]])
-      return scipy.sparse.diags_array(diag,shape=shape, dtype=int,format='csc')
+      hi = scipy.sparse.diags_array(diag,shape=shape, dtype=int,format='csc')
+      if realize and self.FSI == 1:
+        cob = self.real_cob()
+        hi = cob.dot(hi).dot(cob.T.conj())
+      return hi
     else:
       indices = [0] + list(self.block_indices)
       if which == 'e':
@@ -425,6 +438,10 @@ class RationalRepresentation(HighestWeightRepresentation):
             data.extend(Efloat[rows,i1])
       mat = scipy.sparse.csc_array((data,rowind,indptr),
         shape=(self.dim,self.dim))
+      if realize and self.FSI == 1:
+        assert unitary
+        cob = self.real_cob()
+        return cob.tocsc().dot(mat).dot(cob.T.conj())
       return mat
 
   def diagonal_chevalley(self,i):
@@ -705,6 +722,84 @@ class RationalRepresentation(HighestWeightRepresentation):
       if not matcheck(Echeck,-fd):
         badlog('Charge conjugation of e_%d gives incorrect result (%0.4g/%0.4g)',i,numnorm(Echeck,-fd),numnorm(fd))
     return badlog.correct
+
+  def _fix_dual(self):
+    # For self-dual (real or quaternionic) representation, set nonzero weights
+    # to have S_mu = +- identity
+    # If zero is a weight (implies real), obtain Takagi decomposition
+    assert self.FSI
+    self._construct_charge_conjugator()
+    for mu in self.weights:
+      nmu = negate(mu)
+      # Use the one with higher lexical order as "reference" weight
+      if mu > nmu:
+        nmsqp = self._norm_squares[mu]
+        nmsqm = self._norm_squares[nmu]
+        self._norm_squares[nmu] = nmsqp
+        S = self._CC[1][mu]
+        Sd = S.T.raise_index(nmsqp,0).lower_index(nmsqm,1)
+        for i in range(self._group.rank):
+          if nmu in self.raising_blocks[i]:
+            nmuplus,Eraise = self.raising_blocks[i][nmu]
+            Eraise = Eraise.dot(S)
+            self.raising_blocks[i][nmu] = (nmuplus,Eraise.rereduce())
+            _,Elower = self.lowering_blocks[i][nmuplus]
+            Elower = Sd.dot(Elower)
+            self.lowering_blocks[i][nmuplus] = (nmu,Elower.rereduce())
+            constr = S.T.dot(self._construction[nmu][i])
+            self._construction[nmu][i] = constr.rereduce()
+          if nmu in self.lowering_blocks[i]:
+            nmuminus,Elower = self.lowering_blocks[i][nmu]
+            Elower = Elower.dot(S)
+            self.lowering_blocks[i][nmu] = (nmuminus,Elower.rereduce())
+            _,Eraise = self.raising_blocks[i][nmuminus]
+            Eraise = Sd.dot(Eraise)
+            self.raising_blocks[i][nmuminus] = (nmu,Eraise.rereduce())
+            constr = self._construction[nmuminus][i].dot(Sd.T)
+            self._construction[nmuminus][i] = constr.rereduce()
+        self._CC[1][mu] = reye(self.degeneracy(mu))
+        self._CC[1][nmu] = self.FSI * self._CC[1][mu]
+    zerow = self._group.triv
+    if zerow in self:
+      self._takagi0 = takagi_rational(self._CC[1][zerow],
+        self._norm_squares[zerow])
+    else:
+      self._takagi0 = None
+
+  def real_cob(self):
+    # Change into basis where compact real form has real matrix elements
+    # i.e. use Takagi decomposition
+    # Basis is zero weight space (if present), then paired weight spaces
+    # in order
+    assert self.FSI == 1
+    if hasattr(self, '_real_cob'):
+      return self._real_cob
+    idx = 0
+    row = []
+    col = []
+    data = []
+    blockind = self.block_ind_dict
+    if self._takagi0 is not None:
+      j0 = blockind[self._group.triv]
+      (Ure,Uim),nmsqT = self._takagi0
+      norms0 = np.sqrt(self._norm_squares[self._group.triv])
+      normsT = np.sqrt(nmsqT)
+      for j,i in np.argwhere(np.logical_or(Ure,Uim)):
+        row.append(i)
+        col.append(j+j0)
+        data.append(1/normsT[i] * (Ure[j,i] + 1j*Uim[j,i]) * norms0[j])
+      idx += len(nmsqT)
+    for mu,d in zip(self.weights,self.degeneracies):
+      if mu > negate(mu):
+        iplus = blockind[mu]
+        iminus = blockind[negate(mu)]
+        for imu in range(d):
+          row.extend([idx,idx,idx+1,idx+1])
+          col.extend(2*[iplus+imu,iminus+imu])
+          data.extend([x*np.sqrt(.5) for x in [1,1,1j,-1j]])
+          idx += 2
+    self._real_cob = scipy.sparse.csr_array((data,(row,col)))
+    return self._real_cob
 
 
 class RationalTensorDecomposition:
@@ -1138,4 +1233,5 @@ class RationalTensorDecomposition:
   def get_3j(self, lam):
     return self._3js[lam]
 
-from racah import Rational3j,RationalRacahSymbol,RationalRacahOperator
+
+from .racah import Rational3j,RationalRacahSymbol,RationalRacahOperator

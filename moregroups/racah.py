@@ -1,4 +1,4 @@
-from rationallie import *
+from .rationallie import *
 
 
 class Rational3j:
@@ -444,6 +444,57 @@ class Rational3j:
 
   def __contains__(self,mus):
     return mus in self.blocks_in
+
+  def asdenseunitary(self, realize=True):
+    # Convert to dense, IIO form
+    if isinstance(self.rep3,TrivialRepresentation):
+      # Identity or "charge conjugator"
+      if isinstance(self.rep1,TrivialRepresentation):
+        return None
+      if self.rep1.FSI == 0 or (self.rep1.FSI == 1 and realize):
+        return np.expand_dims(np.identity(self.rep1.dim),(2,3))/np.sqrt(self.rep1.dim)
+      else:
+        S = self.rep1.charge_conjugator_fp()/np.sqrt(self.rep1.dim)
+        return np.expand_dims(S.todense(),(2,3))
+        
+    sl1 = self.rep1.block_slice_dict
+    sl2 = self.rep2.block_slice_dict
+    repout = self.rep3.dual
+    sl3 = repout.block_slice_dict
+    d1,d2,d3,D = (self.rep1.dim,self.rep2.dim,self.rep3.dim,self.degeneracy)
+    W = np.zeros((d1,d2,d3,D))
+    renorm = np.sqrt(self.normsquares/repout.dim)
+    from pprint import pprint
+    #print(self.rep1.label,self.rep2.label,repout.label)
+    for (mu1,mu2,mu3),block in self.blocks_in.items():
+      #print(mu1,mu2,negate(mu3))
+      S = self.rep3._CC[1][mu3]
+      # Convert "in" to "out" index
+      outin = self.rep3.raise_idx_block(mu3,S,1)
+      block = np.tensordot(block,outin,(3,1))
+      #pprint(block)
+      # Change all indices to unitary basis
+      block = block/np.sqrt(self.rep1._norm_squares[mu1])[None,:,None,None]
+      block /= np.sqrt(self.rep2._norm_squares[mu2])[None,None,:,None]
+      block *= np.sqrt(repout._norm_squares[negate(mu3)][None,None,None,:])
+      block /= renorm[:,None,None,None]
+      #pprint(block)
+      W[sl1[mu1],sl2[mu2],sl3[negate(mu3)],:] = block.transpose((1,2,3,0))
+    #pprint(np.squeeze(W))
+    if realize:
+      if self.rep1.FSI == 1:
+        Wmat = W.reshape(self.rep1.dim,-1)
+        Wmat = self.rep1.real_cob().conj().dot(Wmat)
+        W = Wmat.reshape(d1,d2,d3,D)
+      if self.rep2.FSI == 1:
+        Wmat = W.transpose(1,0,2,3).reshape(self.rep2.dim,-1)
+        Wmat = self.rep2.real_cob().conj().dot(Wmat)
+        W = Wmat.reshape(d2,d1,d3,D).transpose(1,0,2,3)
+      if repout.FSI == 1:
+        Wmat = W.transpose(2,0,1,3).reshape(repout.dim,-1)
+        Wmat = repout.real_cob().dot(Wmat)
+        W = Wmat.reshape((d3,d1,d2,D)).transpose(1,2,0,3)
+    return W
 
 
 class RationalRacahSymbol:

@@ -686,16 +686,18 @@ class InvariantTensor(GroupTensor,metaclass=GroupDerivedType):
     if self.rank == 2:
       return [self._idxs[0]],[self._idxs[1]]
     nsq = np.sqrt(self.numel)
-    sdiff = np.inf
+    squot = np.inf
     d = 1
     for i in range(self.rank-2):
-      d *= self._spaces[i].dim
-      sd = d - nsq
-      if abs(sd) < sdiff:
+      d *= self._spaces[i].dim # Dimension on "left"
+      sq = nsq/d # Figure of merit - pivot (sd=1) is left=right
+      if sq > 1:
+        squot = sq # Will be closer to 1
         i0 = i
-        sdiff = abs(sd)
-      if sd < 0:
-        break
+      else:
+        if 1/sq < squot: # Closer to 1
+          i0 = i
+        break # Will only get farther
     return self._idxs[:i0+1], self._idxs[i0+1:]
 
   def _svd_fuse(self, left, right):

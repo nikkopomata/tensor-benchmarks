@@ -1,4 +1,4 @@
-from liegroups import *
+from .liegroups import *
 
 class SymbolicRepresentation(HighestWeightRepresentation):
   """Highest-weight representation with coefficients/matrix elements

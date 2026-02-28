@@ -1,12 +1,13 @@
 from quantrada.groups import *
 import sympy
 import scipy.sparse
-import itertools
+import itertools,functools
 from collections import defaultdict
 from fractions import Fraction
-from math import gcd,lcm
-from rationallinalg import invert as inverse_rational
-from rationallinalg import rones,diag,rzeros,rarray,fnorm
+from math import gcd,lcm,factorial
+from .rationallinalg import invert as inverse_rational
+from .rationallinalg import rones,diag,rzeros,rarray,fnorm
+from scipy import linalg
 
 no_strict_checks = False # Bypass potentially time-consuming assertions
 _fix_3j_symmetries = True
@@ -119,7 +120,90 @@ def ituple(arr):
 def negate(mu):
   return tuple(-mui for mui in mu)
 
-class SimpleLieAlgebra:#(Group):
+def _BCH_dynkin_coefficient_XY(xystring):
+  """Coefficient of sequence of Xs and Ys (ending in implicit [X,Y]) in
+  Dynkin expansion of BCH formula
+  Argument is tuple of 0s (representing X) and 1s (representing Y), with final
+  (0,1) omitted (also counts -(1,0))"""
+  # "Minimal" grouping of xs & ys
+  rs = [0]
+  ss = [0]
+  try:
+    xyiter = iter(xystring)
+    while True:
+      while not next(xyiter):
+        rs[-1] += 1
+      ss[-1] += 1
+      while next(xyiter):
+        ss[-1] += 1
+      rs.append(1)
+      ss.append(0)
+  except StopIteration:
+    if xystring[-1]:
+      # Ended on Y
+      xyval = _BCH_dynkin_coefficient(tuple(zip(rs,ss))+((1,1),))
+      ss[-1] += 1
+      yxval = _BCH_dynkin_coefficient(tuple(zip(rs,ss))+((1,0),))
+    else:
+      # Ended on X: for YX increment last s & add (1,0), for XY increment both
+      ss[-1] += 1
+      yxval = _BCH_dynkin_coefficient(tuple(zip(rs,ss))+((1,0),))
+      rs[-1] += 1
+      xyval = _BCH_dynkin_coefficient(tuple(zip(rs,ss)))
+    return Fraction(1,len(xystring)+2) * (xyval - yxval)
+
+@functools.cache
+def _BCH_dynkin_coefficient(rss):
+  n0 = len(rss)
+  nmaxs = [r+s for r,s in rss]
+  inner_coeff = 0
+  for nis in itertools.product(*[range(1,nmax+1) for nmax in nmaxs]):
+    n = sum(nis)
+    term = Fraction((-1)**(n-1),n)
+    for ni,(ri,si) in zip(nis,rss):
+      term *= _dynkin_combinatorial(ri,si,ni)
+    #print(xystring,rss,nis,term)
+    inner_coeff += term
+  return inner_coeff
+
+
+
+@functools.cache
+def _dynkin_combinatorial(r,s,n):
+  """Combinatorial function occuring in calculation of Dynkin expansion of BCH
+  Can be understood as follows: for G the free semigroup
+  on letters a & b, let g in G be a^r b^s.
+  Consider all ways to decompose g (note that all components will belong
+  to the subset X of the form x = a^r' b^s'),
+  and let f:X->R be defined by f(a^r' b^s') = 1/(r'! s'!). Then this function
+  returns the sum, over all sequences {x_i} in X^n whose product evaluates to g,
+  of the product of f(x_i)."""
+  if r+s<n:
+    # No options
+    return 0
+  if r+s==n:
+    # Only one option -- all x are either a or b
+    return 1
+  if n == 1:
+    # x = g
+    return Fraction(1,factorial(r)*factorial(s))
+  # Otherwise recurse over greater of r and s
+  if r >= s:
+    # Case where first x is a^r b^s' is equivalent to 1/r! times
+    # result of r=0, s, n
+    rv = Fraction(1,factorial(r)) * _dynkin_combinatorial(0,s,n)
+    for rl in range(1,r+1):
+      # Pull out x = a^rl
+      rv += Fraction(1,factorial(rl)) * _dynkin_combinatorial(r-rl,s,n-1)
+    return rv
+  else:
+    # Likewise for r,s reversed
+    rv = Fraction(1,factorial(s)) * _dynkin_combinatorial(r,0,n)
+    for sr in range(1,s+1):
+      rv += Fraction(1,factorial(sr)) * _dynkin_combinatorial(r,s-sr,n-1)
+    return rv
+
+class SimpleLieAlgebra(Group):
   def __init__(self, series, rank):
     """Pass A-G series label & rank of Lie algebra"""
     self._CK_series = series
@@ -249,6 +333,8 @@ class SimpleLieAlgebra:#(Group):
     self._highest_weight_rational = {}
     self._dummy_irreps = {}
     self._3js = {}
+    self._CWCnorms = None
+    super().__init__()
 
   @classmethod
   def get_identifier(cls, series, rank):
@@ -260,7 +346,7 @@ class SimpleLieAlgebra:#(Group):
     return self._rank
 
   @property
-  def has_quaternionic(self):
+  def quaternionic(self):
     # Admits quaternionic irreps (in compact form)
     if self._CK_series == 'A':
       return self._rank % 4 == 1
@@ -295,20 +381,26 @@ class SimpleLieAlgebra:#(Group):
     return mu2
 
   def _fdual(self, lam):
+    # Differs from getdualweight on quaternionic irreps
+    # (distinguishes "primary"/"secondary"
+    if any(li<0 for li in lam) or self.indicate(lam) == -1:
+      return negate(lam)
+    else:
+      return self.getdualweight(lam)
+
+  # TODO depricate one of these
+  def getdualweight(self, lam):
     # What I believe is the negative of the action of the maximal element of
     # the Weyl group (assuming this corresponds to duality of Dynkin diagrams
     # iff exists and is unique - exception: Dn for n even)
     if self._CK_series == 'A':
-      return lam[::-1]
+      lbar = lam[::-1]
     elif self._CK_series == 'D' and self._rank % 2:
-      return lam[:-2] + lam[-1:-3:-1]
+      lbar = lam[:-2] + lam[-1:-3:-1]
     elif self._CK_series == 'E' and self._rank == 6:
-      return lam[-2::-1] + (lam[-1],)
+      lbar = lam[-2::-1] + (lam[-1],)
     else:
-      return lam
-
-  def getdualweight(self, lam):
-    lbar = self._fdual(lam)
+      lbar = lam
     if not no_strict_checks:
       rep = self.get_dummy(lam)
       assert lbar == rep.duallabel()
@@ -656,7 +748,7 @@ class SimpleLieAlgebra:#(Group):
       for idx1 in range(npos+nstart):
         for idx2 in range(npos+nstart):
           #res = sympy.SparseMatrix.zeros(npos+nstart,npos+nstart)
-          res = sympy.zeros(npos+nstart,npos+nstart)
+          res = rzeros((npos+nstart,npos+nstart))
           for idx3, in np.argwhere(struc[idx1][:,idx2]):
             res += struc[idx1][idx3,idx2]*struc[idx3]
           compare = struc[idx1].dot(struc[idx2])-struc[idx2].dot(struc[idx1])
@@ -772,6 +864,8 @@ class SimpleLieAlgebra:#(Group):
         else:
           try:
             self._highest_weight_rational[lambda_labels] = RationalRepresentation(lambda_labels,self,dimcheck=dimcheck)
+            if dualweight == lambda_labels:
+              self._highest_weight_rational[lambda_labels]._fix_dual()
           except DimensionCheckException:
             return None
     return self._highest_weight_rational[lambda_labels]
@@ -782,9 +876,12 @@ class SimpleLieAlgebra:#(Group):
     return self._dummy_irreps[lambda_labels]
 
   def order(self, lam):
+    # TODO depricate in favor of irrep_order
+    return self.irrep_order(lam) 
+
+  def irrep_order(self, lam):
     # Tuple (dimension, Dynkin indices) to yield complete ordering on irreps
-    dummy = self.get_dummy(lam)
-    return (dummy.dim,lam)
+    return (self.dim(lam),lam)
 
   def get_adjoint_HW(self):
     labels = ituple(self._cartan_matrix.dot(self._marks))
@@ -1209,19 +1306,244 @@ class SimpleLieAlgebra:#(Group):
         WWT = W.dot(WT).toarray()
         if not np.allclose(WWT,np.eye(rep.dim),atol=tolerance,rtol=tolerance):
           badlog('Failure of unitarity in %sx%s->%s_%d (%0.4g)',
-            lambda1,lambda2,lam,a,np.linalg.norm(WWT-np.eye(rep.dim)))
+            lambda1,lambda2,lam,a,linalg.norm(WWT-np.eye(rep.dim)))
         for i in range(rank):
           hi = hprod[i].toarray()
           hcomp = W.dot(hs[i]).dot(WT).toarray()
           if not np.allclose(hi,hcomp,atol=tolerance,rtol=tolerance):
             badlog('Failure to reproduce h_%d in %sx%s->%s_%d (%0.4g)',
-              i,lambda1,lambda2,lam,a,np.linalg.norm(hi-hcomp))
+              i,lambda1,lambda2,lam,a,linalg.norm(hi-hcomp))
           ei = eprod[i].toarray()
           ecomp = W.dot(es[i]).dot(WT).toarray()
           if not np.allclose(ei,ecomp,atol=tolerance,rtol=tolerance):
             badlog('Failure to reproduce e_%d in %sx%s->%s_%d (%0.4g)',
-              i,lambda1,lambda2,lam,a,np.linalg.norm(ei-ecomp))
+              i,lambda1,lambda2,lam,a,linalg.norm(ei-ecomp))
     return badlog.correct
+
+  @property
+  def dimension(self):
+    return 2*self._positive_roots.shape[0] + self.rank
+
+  @property
+  def triv(self):
+    return self.rank*(0,)
+
+  def isrep(self, l):
+    if not isinstance(l,tuple) or not all(isinstance(li,int) for li in l):
+      return False
+    if len(l) != self.rank:
+      return False
+    if any(li < 0 for li in l):
+      # Only valid for "secondary" quaternionic representation 
+      # (all indices negative of "primary"
+      if any(li > 0 for li in l):
+        return False
+      return self.get_dummy(negate(l)).FSI == -1
+    else:
+      return True
+
+  def indicate(self, l):
+    if any(li<0 for li in l):
+      assert self.get_dummy(negate(l)).FSI == -1
+      return -2
+    return self.get_dummy(l).FSI
+
+  def _firrep(self, lam, coeffs):
+    """Group elements given as exp(g) for g given from coefficients by
+    compact_irrep"""
+    if any(li<0 for li in lam):
+      assert self.indicate(lam) == -2
+      return linalg.expm(self.compact_irrep(negate(lam),coeffs).conj())
+    return linalg.expm(self.compact_irrep(lam,coeffs))
+
+  def compact_irrep(self, lam, coeffs):
+    """Elements of compact real form of irrep lam determined by
+    coefficients of Cartan-Weyl-based generators:
+    First r are iH_j (Cartan subalgebra)
+    Remaining are in pairs corresponding to positive roots alpha:
+    with normalization [E_alpha,E_-alpha] = H_alpha (H_alpha defined wrt
+    root NOT coroot),
+    iX_alpha = iE_alpha + iE_-alpha
+    iY_alpha = E_alpha - E_-alpha"""
+    return self.chevalley_irrep(lam, self._CWcompact_to_chevalley(coeffs))
+
+  def chevalley_irrep(self, lam, coeffs):
+    irrep = self.get_ratrep(lam)
+    es = []
+    mat = np.zeros((irrep.dim,irrep.dim),dtype=complex)
+    npos = self._positive_roots.shape[0]
+    for i in range(self.rank):
+      hi = irrep.fp_chevalley('h',i,realize=True)
+      mat += coeffs[npos+i] * hi
+      ei = irrep.fp_chevalley('e',i,realize=True)
+      es.append(ei)
+    for idx in range(self.rank,npos):
+      p,i,idx0 = self._chevalley_definitions[idx]
+      es.append((es[i].dot(es[idx0]) - es[idx0].dot(es[i]))/p)
+    for idx in range(npos):
+      mat += coeffs[idx] * es[idx]
+      mat += coeffs[npos+self.rank+idx] * es[idx].T.conj()
+    return mat
+    
+  def _CW_to_chevalley_norms(self):
+    npos = len(self._positive_roots)
+    nstart = npos + self.rank
+    if self._CWCnorms is not None:
+      return self._CWCnorms
+    self._CWCnorms = []
+    for idx,alpha in enumerate(self._positive_roots):
+      chev_h = self.chevalley_structure[idx][npos:npos+self.rank,idx+nstart]
+      chev_h = [2*chev_h[i]/self._rootlengthsquared[i] for i in range(self.rank)]
+      normalizer = None
+      for i,ai in enumerate(alpha):
+        if ai:
+          if normalizer is None:
+            normalizer = chev_h[i]/ai
+          else:
+            assert ai * normalizer == chev_h[i]
+        else:
+          assert chev_h[i] == 0
+      if idx < self.rank:
+        assert 2/self._rootlengthsquared[idx] == normalizer
+      self._CWCnorms.append(np.sqrt(normalizer.numerator)/np.sqrt(normalizer.denominator))
+    return self._CWCnorms
+
+  def _CWcompact_to_chevalley(self, coeffs):
+    # See compact_irrep() for basis
+    npos = len(self._positive_roots)
+    nstart = npos + self.rank
+    # Cartan subalgebra: convert from Cartan-Weyl by applying transpose of
+    # fundamental weight definition matrix
+    cartan_coeffs = self._fund_weights.T * sympy.Matrix(coeffs[:self.rank])
+    cartan_coeffs = [1j*complex(a) for a in cartan_coeffs]
+    pos_coeffs = []
+    neg_coeffs = []
+    for idx,norm in enumerate(self._CW_to_chevalley_norms()):
+      cX,cY = coeffs[self.rank+2*idx:self.rank+2*idx+2]
+      pos_coeffs.append((1j*cX + cY)/norm)
+      neg_coeffs.append((1j*cX - cY)/norm)
+    return pos_coeffs + cartan_coeffs + neg_coeffs
+
+  def _chevalley_to_CWcompact(self, coeffs):
+    npos = len(self._positive_roots)
+    nstart = npos + self.rank
+    cartan_coeffs = self._simple_coroots * sympy.Matrix(coeffs[npos:nstart])
+    CWcoeffs = [-1j*complex(a) for a in cartan_coeffs]
+    for idx,norm in enumerate(self._CW_to_chevalley_norms()):
+      cpos = coeffs[idx]
+      cneg = coeffs[idx+nstart]
+      cX = (cpos + cneg)/2j * norm
+      cY = (cpos - cneg)/2 * norm
+      CWcoeffs.extend([cX,cY])
+    return CWcoeffs
+
+  def _firrep1d(self, l, g):
+    assert l == self.triv
+    return 1
+
+  def _fdim(self, lam):
+    if not any(lam):
+      return 1
+    if any(li < 0 for li in lam):
+      lam = negate(lam)
+    weylvec = rones((self.rank,))
+    # Weyl vector & weyl+lambda in "coweight" basis dual to simple roots
+    rls = rarray(self._rootlengthsquared[:self.rank])
+    coweyl = 2*weylvec*rls
+    coweyllam = 2*(weylvec + rarray(lam))*rls
+    d = 1
+    for alpha in self._positive_roots:
+      d *= coweyllam.dot(alpha)
+      d /= coweyl.dot(alpha)
+    assert d.denominator == 1
+    return d.numerator
+
+  def _ffusion(self, lambda1, lambda2):
+    if any(li < 0 for li in lambda1+lambda2):
+      return NotImplemented
+    if self.irrep_order(lambda1) > self.irrep_order(lambda2):
+      return NotImplemented
+    if not any(lambda1):
+      return [(lambda2,None)]
+    return self._fusion_from_decomp(lambda1,lambda2)
+
+  def _fS(self, lam):
+    return self.get_ratrep(lam).charge_conjugator_fp().todense()
+
+  def _fusion_from_decomp(self, lambda1, lambda2):
+    # TODO is this inefficient enough to make it preferable to directly use 3js?
+    decomp = self.tensor_decompose_rational(lambda1, lambda2)
+    for lam3,symbol in decomp._3js.items():
+      yield self.getduallabel(lam3),symbol.asdenseunitary()
+    
+
+  # TODO override Haargen, compose
+  # TODO override product() with SemisimpleLieAlgebra
+  def compose(self, g, h, maxiter=30, realcheck=1e-14):
+    """Compose sufficiently small elements of (compact) Lie group 
+    (see compact_irrep for basis)
+    Uses Dynkin expansion of BCH formula (not heavily simplified, so nth
+    iteration has 2^(n-1) terms - may be very slow even for given value of
+    maxiter)
+    If g & h have all-real components, will return real elements
+      If realcheck is nonzero, will compare imaginary parts of computed
+      components to realcheck * naive norm of gh"""
+    isreal = all(isinstance(xi,(float,np.floating)) for x in (g,h) for xi in x)
+    ghchev = self.compose_chevalley(self._CWcompact_to_chevalley(g),
+      self._CWcompact_to_chevalley(h), maxiter=maxiter)
+    ghCW = self._chevalley_to_CWcompact(ghchev)
+    if isreal and realcheck:
+      normcheck = realcheck*linalg.norm(ghCW)
+      ghreal = []
+      for i,x in enumerate(ghCW):
+        if abs(x.imag) > normcheck:
+          raise ValueError('%dth component of gh, %0.3e + %0.3e i, has '
+            'excessive imaginary component (compared to norm %0.3e of gh,'
+            'or %0.3e, %0.3e of g and h' % (i,x.real,x.imag,
+            linalg.norm(ghCW),linalg.norm(g),linalg.norm(h)))
+        ghreal.append(float(x.real))
+      return tuple(ghreal)
+    return ghCW
+            
+
+  def compose_chevalley(self, X, Y, maxiter=30):
+    eps = 1e-16
+    # Exit when 2 sequential terms have (naive) relative norm < epsilon
+    # Construct adjoint actions of X and Y operating in the Chevalley basis
+    adX = np.zeros((self.dimension,self.dimension),dtype=CPLXTYPE)
+    adY = np.zeros((self.dimension,self.dimension),dtype=CPLXTYPE)
+    for i in range(self.dimension):
+      adX += CPLXTYPE(X[i]) * self.chevalley_structure[i]
+      adY += CPLXTYPE(Y[i]) * self.chevalley_structure[i]
+    Z = np.array(X,dtype=CPLXTYPE) + np.array(Y,dtype=CPLXTYPE)
+    # All commutators encountered so far, indexed by sequence of 0s and 1s
+    # representing Xs and Ys respectively, final pair omitted (always [X,Y])
+    commutators = {():adX.dot(Y)}
+    ads = [adX,adY]
+    last_eps = linalg.norm(commutators[()]/2) < linalg.norm(Z)*eps
+    Z += commutators[()]/2
+    for N in range(3,maxiter):
+      term = np.zeros_like(Z)
+      for xystring in itertools.product((0,1),repeat=N-2):
+        commutators[xystring] = ads[xystring[0]].dot(commutators[xystring[1:]])
+        coeffXY = _BCH_dynkin_coefficient_XY(xystring)
+        term += float(coeffXY) * commutators[xystring]
+      curr_eps = linalg.norm(term) < linalg.norm(Z)*eps
+      Z += term
+      if last_eps and curr_eps:
+        print(N)
+        return Z
+      last_eps = curr_eps
+    raise OverflowError('Baker-Campbell-Hausdorff series failed to converge after %d iterations'%maxiter)
+    
+
+  def complex_pairorder(self, l):
+    # Use lexical ordering on Dynkin labels
+    return l < self.dual(l)
+
+  def __reduce__(self):
+    # TODO save irreps, 3js?
+    return self.__class__, (self._CK_series, self.rank)
 
 
 class HighestWeightRepresentation:
@@ -1257,7 +1579,7 @@ class HighestWeightRepresentation:
         # case - seems like should be true based on idea that HW with quaternionic
         # irreps form sublattice of order 2 in self-dual irreps?
         # Underpredicts for D6?
-        if group.has_quaternionic:
+        if group.quaternionic:
           if group._CK_series == 'A':
             if highest_weight[rank//2]%2:
               self.FSI = -1
@@ -1354,6 +1676,11 @@ class HighestWeightRepresentation:
   def block_ind_dict(self):
     blockidx = [0] + list(self.block_indices)
     return {mu:blockidx[idx] for mu,idx in self.weight_indices.items()}
+
+  @property
+  def block_slice_dict(self):
+    blockidx = [0] + list(self.block_indices)
+    return {mu:slice(*blockidx[idx:idx+2]) for mu,idx in self.weight_indices.items()}
 
 class TrivialRepresentation(HighestWeightRepresentation):
   def __init__(self, group):
@@ -1468,7 +1795,7 @@ class DummyIrrep:
     elif rank*(0,) in self.multiplicities:
       self.FSI = 1
     else:
-      if group.has_quaternionic:
+      if group.quaternionic:
         if group._CK_series == 'A':
           if highest_weight[rank//2]%2:
             self.FSI = -1
@@ -1571,4 +1898,4 @@ class DummyIrrep:
 
 
 
-from rationallie import RationalRepresentation,RationalTensorDecomposition,Rational3j,RationalRacahOperator
+from .rationallie import RationalRepresentation,RationalTensorDecomposition,Rational3j,RationalRacahOperator
